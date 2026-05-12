@@ -16,10 +16,28 @@ export function isAirdropQueueV2Enabled(): boolean {
   return getQueueRuntimeFlagsSync().normalizedQueueV2;
 }
 
+/**
+ * Stable id for heartbeats / `assigned_worker`. Prefer `AIRDROP_WORKER_ID` per replica.
+ * When PM2 (or similar) runs `instances` > 1 in fork mode it sets `NODE_APP_INSTANCE` (0,1,2,…);
+ * we append it to the base id so each fork is unique without hand-editing 30 env files.
+ */
 export function queueWorkerId(): string {
   const raw = process.env.AIRDROP_WORKER_ID?.trim();
-  if (raw) return raw.slice(0, 64);
+  const inst = process.env.NODE_APP_INSTANCE?.trim();
   const pid = typeof process.pid === "number" ? String(process.pid) : "0";
+
+  if (raw) {
+    if (inst !== undefined && inst !== "") {
+      const suffix = `-${inst}`;
+      const room = 64 - suffix.length;
+      const base = room >= 1 ? raw.slice(0, room) : raw.slice(0, 64);
+      return `${base}${suffix}`.slice(0, 64);
+    }
+    return raw.slice(0, 64);
+  }
+  if (inst !== undefined && inst !== "") {
+    return `w-${inst}-${pid}`.slice(0, 64);
+  }
   return `w-${pid}`;
 }
 
