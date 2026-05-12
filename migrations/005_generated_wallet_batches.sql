@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS generated_wallets (
   batch_id UUID NOT NULL REFERENCES generated_wallet_batches(id) ON DELETE CASCADE,
   wallet_index INT NOT NULL,
   address VARCHAR(66) NOT NULL,
-  private_key_encrypted TEXT NOT NULL,
+  private_key_encrypted TEXT NULL,
   mnemonic_encrypted TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT uq_generated_wallets_batch_idx UNIQUE (batch_id, wallet_index)

@@ -2,14 +2,20 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:
 
 const SALT = "makalu-generated-wallet-v1";
 
+/** One scrypt-derived AES key per process. `scryptSync` is intentionally slow; never run it per wallet row. */
+let cachedAesKey: Buffer | null = null;
+
 function deriveKey(): Buffer {
+  if (cachedAesKey) return cachedAesKey;
   const primary = process.env.AIRDROP_WALLET_STORAGE_SECRET?.trim();
   if (primary && primary.length >= 32) {
-    return scryptSync(primary, SALT, 32);
+    cachedAesKey = scryptSync(primary, SALT, 32);
+    return cachedAesKey;
   }
   const auth = process.env.AUTH_SECRET?.trim();
   if (auth && auth.length >= 16) {
-    return scryptSync(auth, SALT, 32);
+    cachedAesKey = scryptSync(auth, SALT, 32);
+    return cachedAesKey;
   }
   throw new Error(
     "Wallet encryption requires AIRDROP_WALLET_STORAGE_SECRET (32+ characters recommended) or AUTH_SECRET (min 16 chars).",

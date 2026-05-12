@@ -172,13 +172,11 @@ export default function WalletBatchesDashboard() {
     }
   }
 
-  function exportCsv(keys: boolean) {
+  function exportCsv() {
     if (!token || !selectedId) return;
     const u = new URL(`/api/airdrop/wallet-batches/${selectedId}/export`, window.location.origin);
-    if (keys) u.searchParams.set("includePrivateKeys", "1");
     const h = new Headers();
     if (token) h.set("Authorization", `Bearer ${token}`);
-    if (keys) h.set("x-export-private-keys", "confirm");
     void fetch(u.toString(), { headers: h }).then(async (res) => {
       if (!res.ok) {
         setError("Export failed");
@@ -187,7 +185,7 @@ export default function WalletBatchesDashboard() {
       const blob = await res.blob();
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = keys ? "wallets-with-keys.csv" : "wallets-addresses.csv";
+      a.download = "wallets-addresses.csv";
       a.click();
       URL.revokeObjectURL(a.href);
     });
@@ -308,11 +306,8 @@ export default function WalletBatchesDashboard() {
                   Resume generation
                 </Button>
               ) : null}
-              <Button type="button" variant="outline" className="rounded-xl" onClick={() => exportCsv(false)} disabled={!token}>
+              <Button type="button" variant="outline" className="rounded-xl" onClick={() => exportCsv()} disabled={!token}>
                 Export CSV (addresses)
-              </Button>
-              <Button type="button" variant="outline" className="rounded-xl border-red-300 text-red-800 dark:border-red-800 dark:text-red-200" onClick={() => exportCsv(true)} disabled={!token}>
-                Export CSV with private keys
               </Button>
             </div>
             <div className="space-y-2">

@@ -7,11 +7,10 @@
  * Uses a PostgreSQL advisory lock per batch so two wallet workers never insert into the same batch concurrently.
  * Dashboard/API: `POST /api/airdrop/wallet-batches/{id}/resume` requeues `running` → `pending` if you prefer that path.
  *
- * Env: DATABASE_URL, AUTH_SECRET or AIRDROP_WALLET_STORAGE_SECRET, WALLET_GENERATION_BATCH_SIZE (optional).
+ * Env: DATABASE_URL, WALLET_GENERATION_BATCH_SIZE (optional). No wallet encryption secrets required for address-only batches.
  */
 import { Wallet } from "ethers";
 import { bootstrapProductionEnv, assertDatabaseConfigured } from "../src/lib/queue/production-env";
-import { encryptWalletField } from "../src/lib/wallet-field-crypto";
 import { walletGenerationInsertChunk } from "../src/lib/generated-wallet-config";
 import {
   claimNextPendingBatch,
@@ -83,7 +82,7 @@ void (async () => {
         if (nextIndex < 1) nextIndex = 1;
 
         while (nextIndex <= total) {
-          const rows: { wallet_index: number; address: string; private_key_encrypted: string }[] = [];
+          const rows: { wallet_index: number; address: string; private_key_encrypted: null }[] = [];
           const take = Math.min(chunk, total - nextIndex + 1);
           for (let i = 0; i < take; i++) {
             const w = Wallet.createRandom();
@@ -91,7 +90,7 @@ void (async () => {
             rows.push({
               wallet_index: idx,
               address: w.address,
-              private_key_encrypted: encryptWalletField(w.privateKey),
+              private_key_encrypted: null,
             });
           }
 

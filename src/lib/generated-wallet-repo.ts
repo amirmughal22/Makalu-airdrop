@@ -160,7 +160,8 @@ export async function markBatchFailed(batchId: string, err: string): Promise<voi
 export type GeneratedWalletInsertRow = {
   wallet_index: number;
   address: string;
-  private_key_encrypted: string;
+  /** Always null for new batches — only recipient addresses are stored. */
+  private_key_encrypted: string | null;
 };
 
 export async function insertGeneratedWalletChunk(
@@ -250,16 +251,16 @@ export async function countGeneratedWalletsPage(params: {
   return Number(r[0]?.c ?? 0);
 }
 
-export async function exportGeneratedWalletsWithKeys(params: {
+export async function exportGeneratedWalletsCsvChunk(params: {
   batchId: string;
   ownerLower: string;
   limit: number;
   offset: number;
-}): Promise<Array<{ wallet_index: number; address: string; private_key_encrypted: string }>> {
+}): Promise<Array<{ wallet_index: number; address: string }>> {
   const pool = await getPostgresPool();
   return pgQuery(
     pool,
-    `SELECT gw.wallet_index, gw.address, gw.private_key_encrypted
+    `SELECT gw.wallet_index, gw.address
      FROM generated_wallets gw
      INNER JOIN generated_wallet_batches b ON b.id = gw.batch_id
      WHERE gw.batch_id = ?::uuid AND b.owner = ?

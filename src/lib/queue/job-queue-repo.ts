@@ -229,8 +229,7 @@ export type CreateNormalizedJobFromBatchInput = {
 const JOB_WALLET_FROM_GENERATED_CHUNK = 2500;
 
 /**
- * Creates a draft job and fills `job_wallets` from `generated_wallets` (server-side SELECT for single signer;
- * chunked copy for multiple signers with rotation).
+ * Creates a draft job and fills `job_wallets` from `generated_wallets` (addresses only; distributor signers send transfers).
  * @returns number of wallet rows inserted
  */
 export async function createNormalizedJobFromGeneratedBatch(input: CreateNormalizedJobFromBatchInput): Promise<number> {
@@ -293,9 +292,8 @@ export async function createNormalizedJobFromGeneratedBatch(input: CreateNormali
     if (distributors.length === 1) {
       await pgExecute(
         conn,
-        `INSERT INTO job_wallets (job_id, wallet_address, amount, status, signer_address, private_key)
-         SELECT ?::varchar(64), lower(gw.address)::varchar(66), ?::varchar(128), 'pending', ?::varchar(66),
-                convert_to(gw.private_key_encrypted, 'UTF8')
+        `INSERT INTO job_wallets (job_id, wallet_address, amount, status, signer_address)
+         SELECT ?::varchar(64), lower(gw.address)::varchar(66), ?::varchar(128), 'pending', ?::varchar(66)
          FROM generated_wallets gw
          WHERE gw.batch_id = ?::uuid AND gw.wallet_index BETWEEN ? AND ?
          ORDER BY gw.wallet_index`,
@@ -308,24 +306,23 @@ export async function createNormalizedJobFromGeneratedBatch(input: CreateNormali
         const slice = await pgQuery<{
           wallet_index: number;
           address: string;
-          private_key_encrypted: string;
         }>(
           conn,
-          `SELECT wallet_index, address, private_key_encrypted FROM generated_wallets
+          `SELECT wallet_index, address FROM generated_wallets
            WHERE batch_id = ?::uuid AND wallet_index BETWEEN ? AND ?
            ORDER BY wallet_index ASC`,
           [input.generatedBatchId, cur, hi],
         );
-        const placeholders = slice.map(() => "(?, ?, ?, 'pending', ?, convert_to(?, 'UTF8'))").join(", ");
+        const placeholders = slice.map(() => "(?, ?, ?, 'pending', ?)").join(", ");
         const flat: unknown[] = [];
         for (const row of slice) {
           const signer = distributors[(row.wallet_index - fromIdx) % distributors.length]!;
-          flat.push(input.jobId, row.address.toLowerCase(), String(input.amount), signer, row.private_key_encrypted);
+          flat.push(input.jobId, row.address.toLowerCase(), String(input.amount), signer);
         }
         if (flat.length) {
           await pgExecute(
             conn,
-            `INSERT INTO job_wallets (job_id, wallet_address, amount, status, signer_address, private_key) VALUES ${placeholders}`,
+            `INSERT INTO job_wallets (job_id, wallet_address, amount, status, signer_address) VALUES ${placeholders}`,
             flat,
           );
         }
