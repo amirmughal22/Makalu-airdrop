@@ -1,5 +1,5 @@
 /**
- * Operational CLI for the normalized queue (MySQL).
+ * Operational CLI for the normalized queue (PostgreSQL).
  *
  * Usage (from repo root):
  *   npm run queue:admin -- stale
@@ -21,8 +21,7 @@
  *
  * Requires DATABASE_URL (or DB_* vars merged by database-url.js).
  */
-import type { RowDataPacket } from "mysql2";
-import { getMysqlPool } from "../src/lib/mysql";
+import { getPostgresPool, pgQuery } from "../src/lib/postgres";
 import { getQueueOperationalSnapshot } from "../src/lib/queue/queue-operations-snapshot";
 import {
   getQueueRuntimeCacheMeta,
@@ -100,8 +99,9 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "workers") {
-    const pool = await getMysqlPool();
-    const [rows] = await pool.execute<RowDataPacket[]>(
+    const pool = await getPostgresPool();
+    const rows = await pgQuery<Record<string, unknown>>(
+      pool,
       `SELECT worker_id, hostname, active_job_id, last_heartbeat, iterations, rows_ok, rows_fail, last_batch_size
        FROM queue_worker_heartbeats
        ORDER BY last_heartbeat DESC
@@ -131,9 +131,10 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "dump-worker-state") {
-    const pool = await getMysqlPool();
-    const [settings] = await pool.execute<RowDataPacket[]>(`SELECT * FROM queue_runtime_settings WHERE id = 1`);
-    const [heartbeats] = await pool.execute<RowDataPacket[]>(
+    const pool = await getPostgresPool();
+    const settings = await pgQuery<Record<string, unknown>>(pool, `SELECT * FROM queue_runtime_settings WHERE id = 1`);
+    const heartbeats = await pgQuery<Record<string, unknown>>(
+      pool,
       `SELECT worker_id, hostname, active_job_id, last_heartbeat, iterations, rows_ok, rows_fail, last_batch_size, updated_at
        FROM queue_worker_heartbeats
        ORDER BY last_heartbeat DESC

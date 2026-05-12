@@ -9,8 +9,6 @@
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RowDataPacket } from "mysql2";
-
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 import { assertDatabaseConfigured, bootstrapProductionEnv } from "../src/lib/queue/production-env";
@@ -30,12 +28,14 @@ void (async () => {
     process.exit(0);
   }
 
-  const pool = await (await import("../src/lib/mysql")).getMysqlPool();
-  const [freshRows] = await pool.execute<RowDataPacket[]>(
-    `SELECT COUNT(*) AS c FROM queue_worker_heartbeats
-     WHERE last_heartbeat >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 8 MINUTE)`,
+  const { getPostgresPool, pgQuery } = await import("../src/lib/postgres");
+  const pool = await getPostgresPool();
+  const freshRows = await pgQuery<{ c: string }>(
+    pool,
+    `SELECT COUNT(*)::text AS c FROM queue_worker_heartbeats
+     WHERE last_heartbeat >= NOW() - INTERVAL '8 minutes'`,
   );
-  const freshCount = Number((freshRows[0] as { c: number }).c ?? 0);
+  const freshCount = Number(freshRows[0]?.c ?? 0);
 
   if (freshCount > 0) {
     console.info("[worker-watchdog] Claimable rows:", match, "recent heartbeat(s):", freshCount, "— OK.");

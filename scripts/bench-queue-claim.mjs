@@ -1,16 +1,16 @@
 /**
  * Measures SELECT … FOR UPDATE SKIP LOCKED (claim-shaped query) inside a transaction that rolls back,
- * so rows are not left in `processing`. Requires MySQL 8+ / MariaDB with SKIP LOCKED.
+ * so rows are not left in `processing`. PostgreSQL.
  *
  *   node --env-file=.env scripts/bench-queue-claim.mjs
  *
- * Env: DATABASE_URL, optional AIRDROP_QUEUE_BATCH_SIZE (default 20), AIRDROP_QUEUE_MAX_RETRIES (default 5).
+ * Env: DATABASE_URL (postgresql://…), optional AIRDROP_QUEUE_BATCH_SIZE (default 20), AIRDROP_QUEUE_MAX_RETRIES (default 5).
  */
-import mysql from "mysql2/promise";
+import pg from "pg";
 
 const url = process.env.DATABASE_URL?.trim();
-if (!url) {
-  console.error("DATABASE_URL required");
+if (!url || !/^postgres(ql)?:\/\//i.test(url)) {
+  console.error("DATABASE_URL must be a postgresql:// connection string");
   process.exit(1);
 }
 
@@ -21,32 +21,32 @@ const batch = Math.min(
 const maxRetries = Math.max(0, parseInt(process.env.AIRDROP_QUEUE_MAX_RETRIES ?? "5", 10) || 5);
 const maxAttempts = maxRetries + 1;
 
-const pool = mysql.createPool({ uri: url, connectionLimit: 2 });
+const pool = new pg.Pool({ connectionString: url, max: 2 });
 
-const sql = `SELECT jw.id AS id, jw.job_id AS jobId
+const sql = `SELECT jw.id AS id, jw.job_id AS "jobId"
      FROM job_wallets jw
      INNER JOIN jobs j ON j.id = jw.job_id
      WHERE jw.status = 'pending'
-       AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= CURRENT_TIMESTAMP(3))
-       AND jw.retry_count < ?
+       AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
+       AND jw.retry_count < $1
        AND j.status IN ('queued', 'running')
-       AND j.paused = 0
+       AND NOT j.paused
      ORDER BY jw.job_id, jw.id
-     LIMIT ?
+     LIMIT $2
      FOR UPDATE SKIP LOCKED`;
 
 async function run() {
-  const conn = await pool.getConnection();
+  const conn = await pool.connect();
   try {
-    await conn.beginTransaction();
+    await conn.query("BEGIN");
     const t0 = process.hrtime.bigint();
-    const [rows] = await conn.query(sql, [maxAttempts, batch]);
+    const { rows } = await conn.query(sql, [maxAttempts, batch]);
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    await conn.rollback();
+    await conn.query("ROLLBACK");
     console.log(
       JSON.stringify(
         {
-          rowsLocked: Array.isArray(rows) ? rows.length : 0,
+          rowsLocked: rows.length,
           claimSelectMs: Math.round(ms * 1000) / 1000,
           batchLimit: batch,
         },

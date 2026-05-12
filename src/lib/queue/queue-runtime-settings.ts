@@ -1,5 +1,5 @@
-import type { RowDataPacket } from "mysql2";
-import { getMysqlPool } from "../mysql";
+import { getPostgresPool, pgExecute, pgQuery } from "../postgres";
+import { safeRedisDel, safeRedisGet, safeRedisSetex } from "../redis";
 import { observeRuntimeRefreshSequence } from "./queue-worker-liveness";
 
 export type QueueRuntimeFlags = {
@@ -15,6 +15,8 @@ export type QueueRuntimeFlags = {
 };
 
 const TTL_MS = 2000;
+const REDIS_RUNTIME_KEY = "airdrop:queue_runtime_v1";
+const REDIS_TTL_SEC = 2;
 
 const DEFAULT_FLAGS: QueueRuntimeFlags = {
   processingEnabled: true,
@@ -76,23 +78,91 @@ export function getQueueRuntimeCacheMeta(): QueueRuntimeCacheMeta {
   };
 }
 
+type RedisRuntimePayload = QueueRuntimeFlags & {
+  dbUpdatedAtMs: number | null;
+  cachedAt: number;
+};
+
+function applyCacheFromRow(
+  row: {
+    processing_enabled?: boolean;
+    normalized_queue_v2?: boolean;
+    embedded_worker?: boolean;
+    max_parallel_txs?: number;
+    max_concurrent_jobs?: number;
+    embedded_worker_count?: number;
+    db_updated_ms?: string | number | null;
+  },
+  loadedFromDbFallback: boolean,
+): void {
+  const mp = clampParallel(Number(row.max_parallel_txs ?? DEFAULT_FLAGS.maxParallelTxs));
+  const mj = clampConcurrentJobs(Number(row.max_concurrent_jobs ?? DEFAULT_FLAGS.maxConcurrentJobs));
+  const ew = clampEmbeddedWorkerCount(Number(row.embedded_worker_count ?? DEFAULT_FLAGS.embeddedWorkerCount));
+  const dbMsRaw = row.db_updated_ms;
+  const dbUpdatedAtMs =
+    dbMsRaw != null && String(dbMsRaw).trim() !== "" ? Math.round(Number(dbMsRaw)) : null;
+  refreshSequence++;
+  cache = {
+    processingEnabled: Boolean(row.processing_enabled ?? true),
+    normalizedQueueV2: Boolean(row.normalized_queue_v2 ?? true),
+    embeddedWorker: Boolean(row.embedded_worker ?? true),
+    maxParallelTxs: mp,
+    maxConcurrentJobs: mj,
+    embeddedWorkerCount: ew,
+    at: Date.now(),
+    dbUpdatedAtMs: Number.isFinite(dbUpdatedAtMs ?? NaN) ? dbUpdatedAtMs : null,
+    loadedFromDbFallback,
+  };
+  observeRuntimeRefreshSequence(refreshSequence);
+}
+
 export async function refreshQueueRuntimeCache(): Promise<void> {
   try {
-    const pool = await getMysqlPool();
-    const [rows] = await pool.execute<RowDataPacket[]>(
+    const rawRedis = await safeRedisGet(REDIS_RUNTIME_KEY);
+    if (rawRedis) {
+      try {
+        const parsed = JSON.parse(rawRedis) as RedisRuntimePayload;
+        if (
+          parsed &&
+          typeof parsed.cachedAt === "number" &&
+          Date.now() - parsed.cachedAt < TTL_MS &&
+          typeof parsed.processingEnabled === "boolean"
+        ) {
+          applyCacheFromRow(
+            {
+              processing_enabled: parsed.processingEnabled,
+              normalized_queue_v2: parsed.normalizedQueueV2,
+              embedded_worker: parsed.embeddedWorker,
+              max_parallel_txs: parsed.maxParallelTxs,
+              max_concurrent_jobs: parsed.maxConcurrentJobs,
+              embedded_worker_count: parsed.embeddedWorkerCount,
+              db_updated_ms: parsed.dbUpdatedAtMs,
+            },
+            false,
+          );
+          return;
+        }
+      } catch {
+        /* fall through to DB */
+      }
+    }
+
+    const pool = await getPostgresPool();
+    const rows = await pgQuery<{
+      processing_enabled: boolean;
+      normalized_queue_v2: boolean;
+      embedded_worker: boolean;
+      max_parallel_txs: number;
+      max_concurrent_jobs: number;
+      embedded_worker_count: number;
+      db_updated_ms: string | null;
+    }>(
+      pool,
       `SELECT processing_enabled, normalized_queue_v2, embedded_worker, max_parallel_txs, max_concurrent_jobs, embedded_worker_count,
-              UNIX_TIMESTAMP(updated_at) * 1000 AS db_updated_ms
+              (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint::text AS db_updated_ms
        FROM queue_runtime_settings WHERE id = 1`,
     );
-    const row = rows[0] as {
-      processing_enabled?: number;
-      normalized_queue_v2?: number;
-      embedded_worker?: number;
-      max_parallel_txs?: number;
-      max_concurrent_jobs?: number;
-      embedded_worker_count?: number;
-      db_updated_ms?: string | number | null;
-    } | undefined;
+    const row = rows[0];
     if (!row) {
       refreshSequence++;
       cache = {
@@ -104,27 +174,18 @@ export async function refreshQueueRuntimeCache(): Promise<void> {
       observeRuntimeRefreshSequence(refreshSequence);
       return;
     }
-    const mp = clampParallel(Number(row.max_parallel_txs ?? DEFAULT_FLAGS.maxParallelTxs));
-    const mj = clampConcurrentJobs(Number(row.max_concurrent_jobs ?? DEFAULT_FLAGS.maxConcurrentJobs));
-    const ew = clampEmbeddedWorkerCount(Number(row.embedded_worker_count ?? DEFAULT_FLAGS.embeddedWorkerCount));
-    const dbMsRaw = row.db_updated_ms;
-    const dbUpdatedAtMs =
-      dbMsRaw != null && String(dbMsRaw).trim() !== ""
-        ? Math.round(Number(dbMsRaw))
-        : null;
-    refreshSequence++;
-    cache = {
-      processingEnabled: Boolean(Number(row.processing_enabled ?? 1)),
-      normalizedQueueV2: Boolean(Number(row.normalized_queue_v2 ?? 1)),
-      embeddedWorker: Boolean(Number(row.embedded_worker ?? 1)),
-      maxParallelTxs: mp,
-      maxConcurrentJobs: mj,
-      embeddedWorkerCount: ew,
-      at: Date.now(),
-      dbUpdatedAtMs: Number.isFinite(dbUpdatedAtMs ?? NaN) ? dbUpdatedAtMs : null,
-      loadedFromDbFallback: false,
+    applyCacheFromRow(row, false);
+    const payload: RedisRuntimePayload = {
+      processingEnabled: cache!.processingEnabled,
+      normalizedQueueV2: cache!.normalizedQueueV2,
+      embeddedWorker: cache!.embeddedWorker,
+      maxParallelTxs: cache!.maxParallelTxs,
+      maxConcurrentJobs: cache!.maxConcurrentJobs,
+      embeddedWorkerCount: cache!.embeddedWorkerCount,
+      dbUpdatedAtMs: cache!.dbUpdatedAtMs,
+      cachedAt: Date.now(),
     };
-    observeRuntimeRefreshSequence(refreshSequence);
+    await safeRedisSetex(REDIS_RUNTIME_KEY, REDIS_TTL_SEC, JSON.stringify(payload));
   } catch {
     refreshSequence++;
     cache = {
@@ -178,28 +239,30 @@ export async function setQueueRuntimeFlagsPartial(partial: Partial<QueueRuntimeF
         ? clampEmbeddedWorkerCount(partial.embeddedWorkerCount)
         : cur.embeddedWorkerCount,
   };
-  const pool = await getMysqlPool();
-  await pool.execute(
+  const pool = await getPostgresPool();
+  await pgExecute(
+    pool,
     `INSERT INTO queue_runtime_settings (
        id, processing_enabled, normalized_queue_v2, embedded_worker, max_parallel_txs, max_concurrent_jobs, embedded_worker_count
      ) VALUES (1, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       processing_enabled = VALUES(processing_enabled),
-       normalized_queue_v2 = VALUES(normalized_queue_v2),
-       embedded_worker = VALUES(embedded_worker),
-       max_parallel_txs = VALUES(max_parallel_txs),
-       max_concurrent_jobs = VALUES(max_concurrent_jobs),
-       embedded_worker_count = VALUES(embedded_worker_count),
-       updated_at = CURRENT_TIMESTAMP(3)`,
+     ON CONFLICT (id) DO UPDATE SET
+       processing_enabled = EXCLUDED.processing_enabled,
+       normalized_queue_v2 = EXCLUDED.normalized_queue_v2,
+       embedded_worker = EXCLUDED.embedded_worker,
+       max_parallel_txs = EXCLUDED.max_parallel_txs,
+       max_concurrent_jobs = EXCLUDED.max_concurrent_jobs,
+       embedded_worker_count = EXCLUDED.embedded_worker_count,
+       updated_at = NOW()`,
     [
-      next.processingEnabled ? 1 : 0,
-      next.normalizedQueueV2 ? 1 : 0,
-      next.embeddedWorker ? 1 : 0,
+      next.processingEnabled,
+      next.normalizedQueueV2,
+      next.embeddedWorker,
       next.maxParallelTxs,
       next.maxConcurrentJobs,
       next.embeddedWorkerCount,
     ],
   );
+  await safeRedisDel(REDIS_RUNTIME_KEY);
   invalidateQueueRuntimeCache();
   await refreshQueueRuntimeCache();
   return getQueueRuntimeFlagsSync();

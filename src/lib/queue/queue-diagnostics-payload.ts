@@ -1,5 +1,4 @@
-import type { RowDataPacket } from "mysql2";
-import { getMysqlPool } from "../mysql";
+import { getPostgresPool, pgQuery } from "../postgres";
 import { collectEmbeddedWorkerBlockers, collectQueueClaimBlockers, isAirdropQueueV2EnvEnabled } from "./config";
 import { getQueueOperationalSnapshot } from "./queue-operations-snapshot";
 import { getQueueRuntimeFlagsSync, refreshQueueRuntimeCache } from "./queue-runtime-settings";
@@ -32,8 +31,9 @@ export type QueueDiagnosticsPayload = {
 
 export async function buildQueueDiagnosticsPayload(): Promise<QueueDiagnosticsPayload> {
   await refreshQueueRuntimeCache();
-  const pool = await getMysqlPool();
-  const [hbRows] = await pool.execute<RowDataPacket[]>(
+  const pool = await getPostgresPool();
+  const hbRows = await pgQuery<Record<string, unknown>>(
+    pool,
     `SELECT worker_id, hostname, last_heartbeat, iterations, rows_ok, rows_fail, last_batch_size, active_job_id
      FROM queue_worker_heartbeats
      ORDER BY last_heartbeat DESC

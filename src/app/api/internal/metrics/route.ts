@@ -1,6 +1,5 @@
-import type { RowDataPacket } from "mysql2";
 import { NextResponse } from "next/server";
-import { getMysqlPool } from "@/lib/mysql";
+import { getPostgresPool, pgQuery } from "@/lib/postgres";
 import { getRpcEndpointStats, rpcHostMetricLabel } from "@/lib/rpc-health";
 import { getQueueRuntimeCacheMeta } from "@/lib/queue/queue-runtime-settings";
 import { getQueueWorkerLivenessSnapshot } from "@/lib/queue/queue-worker-liveness";
@@ -9,7 +8,7 @@ import { getQueueWorkerLivenessSnapshot } from "@/lib/queue/queue-worker-livenes
  * Prometheus-compatible scrape endpoint (text/plain).
  * Protect with `METRICS_SECRET`: `Authorization: Bearer <secret>` or `?token=`.
  *
- * Note: This deployment uses **EVM (Makalu) + MySQL** queue — not Solana.
+ * Note: This deployment uses **EVM (Makalu) + PostgreSQL** queue.
  */
 export async function GET(request: Request) {
   const secret = process.env.METRICS_SECRET?.trim();
@@ -74,7 +73,7 @@ export async function GET(request: Request) {
     }
   }
 
-  const pool = await getMysqlPool().catch(() => null);
+  const pool = await getPostgresPool().catch(() => null);
   if (!pool) {
     lines.push("# makalu_db_up 0");
     lines.push("# TYPE makalu_db_up gauge");
@@ -89,15 +88,17 @@ export async function GET(request: Request) {
   lines.push("makalu_db_up 1");
 
   try {
-    const [pendingRows] = await pool.execute<RowDataPacket[]>(
-      `SELECT COUNT(*) AS c FROM job_wallets WHERE status = 'pending'
-       AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP(3))`,
+    const pendingRows = await pgQuery<{ c: string }>(
+      pool,
+      `SELECT COUNT(*)::text AS c FROM job_wallets WHERE status = 'pending'
+       AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())`,
     );
-    const [processingRows] = await pool.execute<RowDataPacket[]>(
-      `SELECT COUNT(*) AS c FROM job_wallets WHERE status = 'processing'`,
+    const processingRows = await pgQuery<{ c: string }>(
+      pool,
+      `SELECT COUNT(*)::text AS c FROM job_wallets WHERE status = 'processing'`,
     );
-    const pc = Number((pendingRows[0] as { c: number }).c ?? 0);
-    const pr = Number((processingRows[0] as { c: number }).c ?? 0);
+    const pc = Number(pendingRows[0]?.c ?? 0);
+    const pr = Number(processingRows[0]?.c ?? 0);
     lines.push("# HELP makalu_queue_job_wallets_pending Claimable pending rows.");
     lines.push("# TYPE makalu_queue_job_wallets_pending gauge");
     lines.push(`makalu_queue_job_wallets_pending ${pc}`);
@@ -105,10 +106,11 @@ export async function GET(request: Request) {
     lines.push("# TYPE makalu_queue_job_wallets_processing gauge");
     lines.push(`makalu_queue_job_wallets_processing ${pr}`);
 
-    const [hbRows] = await pool.execute<RowDataPacket[]>(
-      `SELECT COUNT(*) AS c FROM queue_worker_heartbeats WHERE last_heartbeat > DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 2 MINUTE)`,
+    const hbRows = await pgQuery<{ c: string }>(
+      pool,
+      `SELECT COUNT(*)::text AS c FROM queue_worker_heartbeats WHERE last_heartbeat > NOW() - INTERVAL '2 minutes'`,
     );
-    const alive = Number((hbRows[0] as { c: number }).c ?? 0);
+    const alive = Number(hbRows[0]?.c ?? 0);
     lines.push("# HELP makalu_queue_workers_alive Heartbeats seen in last 2 minutes.");
     lines.push("# TYPE makalu_queue_workers_alive gauge");
     lines.push(`makalu_queue_workers_alive ${alive}`);

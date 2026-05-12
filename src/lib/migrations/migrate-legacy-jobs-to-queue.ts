@@ -2,9 +2,9 @@
  * Migrates legacy `airdrop_jobs.resultsJson` recipient arrays into normalized `jobs` + `job_wallets`.
  * Safe per-job transactions; chunked INSERTs (default 1000) inside each transaction.
  */
-import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import type { PoolClient } from "pg";
 import type { BatchResult } from "../job-types";
-import { getMysqlPool, type JobRow } from "../mysql";
+import { getPostgresPool, pgExecute, pgQuery, type JobRow } from "../postgres";
 import { refreshJobAggregates } from "../queue/job-queue-repo";
 
 export type MigrateLegacyJobsOptions = {
@@ -134,8 +134,14 @@ function expectCountsFromParsed(parsed: BatchResult[]): {
   return { total: parsed.length, completed, failed, pending };
 }
 
-async function validateMigration(pool: Awaited<ReturnType<typeof getMysqlPool>>, jobId: string, expected: ReturnType<typeof expectCountsFromParsed>): Promise<void> {
-  const [rows] = await pool.execute<RowDataPacket[]>(
+async function validateMigration(pool: Awaited<ReturnType<typeof getPostgresPool>>, jobId: string, expected: ReturnType<typeof expectCountsFromParsed>): Promise<void> {
+  const rows = await pgQuery<{
+    total?: unknown;
+    completed?: unknown;
+    failed?: unknown;
+    pendingish?: unknown;
+  }>(
+    pool,
     `SELECT
        COUNT(*) AS total,
        COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
@@ -144,16 +150,11 @@ async function validateMigration(pool: Awaited<ReturnType<typeof getMysqlPool>>,
      FROM job_wallets WHERE job_id = ?`,
     [jobId],
   );
-  const r = rows[0] as RowDataPacket & {
-    total?: unknown;
-    completed?: unknown;
-    failed?: unknown;
-    pendingish?: unknown;
-  };
-  const total = Number(r.total ?? 0);
-  const completed = Number(r.completed ?? 0);
-  const failed = Number(r.failed ?? 0);
-  const pendingish = Number(r.pendingish ?? 0);
+  const r = rows[0];
+  const total = Number(r?.total ?? 0);
+  const completed = Number(r?.completed ?? 0);
+  const failed = Number(r?.failed ?? 0);
+  const pendingish = Number(r?.pendingish ?? 0);
 
   if (total !== expected.total) {
     throw new Error(`validation: total mismatch DB=${total} expected=${expected.total}`);
@@ -220,36 +221,33 @@ function buildWalletRows(
 
 /** Locks legacy row, replaces normalized `jobs`/`job_wallets`, sets `migrated_to_queue`. Returns null if skipped. */
 async function migrateOneLegacyJobMutating(
-  conn: PoolConnection,
+  conn: PoolClient,
   jobId: string,
   chunkSize: number,
 ): Promise<{ jobId: string; walletCount: number; expected: ReturnType<typeof expectCountsFromParsed> } | null> {
-  await conn.beginTransaction();
+  await conn.query("BEGIN");
   try {
-    const [locked] = await conn.execute<JobRow[]>(
-      `SELECT * FROM airdrop_jobs WHERE id = ? FOR UPDATE`,
-      [jobId],
-    );
+    const locked = await pgQuery<JobRow>(conn, `SELECT * FROM airdrop_jobs WHERE id = ? FOR UPDATE`, [jobId]);
     const legacy = locked[0];
     if (!legacy) {
-      await conn.rollback();
+      await conn.query("ROLLBACK");
       return null;
     }
     if (Boolean(legacy.migrated_to_queue)) {
-      await conn.rollback();
+      await conn.query("ROLLBACK");
       return null;
     }
 
     const parsed = parseLegacyResultsJson(legacy.resultsJson);
     if (parsed.length === 0) {
-      await conn.rollback();
+      await conn.query("ROLLBACK");
       console.warn(`[migrate] skip ${jobId}: empty resultsJson`);
       return null;
     }
     const walletRows = buildWalletRows(legacy, parsed);
     const expected = expectCountsFromParsed(parsed);
 
-    await conn.execute(`DELETE FROM jobs WHERE id = ?`, [jobId]);
+    await pgExecute(conn, `DELETE FROM jobs WHERE id = ?`, [jobId]);
 
     const chainId =
       legacy.chainId != null && Number(legacy.chainId) > 0 ? Number(legacy.chainId) : null;
@@ -265,13 +263,14 @@ async function migrateOneLegacyJobMutating(
     const signersJson = JSON.stringify(distResolved);
     const firstSigner = distResolved[0] ?? String(legacy.owner).toLowerCase();
 
-    await conn.execute(
+    await pgExecute(
+      conn,
       `INSERT INTO jobs (
         id, owner, name, status, total_wallets, processed_wallets, failed_wallets,
         mode, token_address, chain_id, paused, scheduled_at, queued_at,
         target_run_count, current_run, signer_address, signer_addresses_json,
         created_at, updated_at
-      ) VALUES (?, ?, NULL, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))`,
+      ) VALUES (?, ?, NULL, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, NOW())`,
       [
         jobId,
         String(legacy.owner).toLowerCase(),
@@ -279,7 +278,7 @@ async function migrateOneLegacyJobMutating(
         String(legacy.mode),
         legacy.tokenAddress ? String(legacy.tokenAddress) : null,
         chainId,
-        legacy.paused ? 1 : 0,
+        Boolean(legacy.paused),
         legacy.scheduledAt ? new Date(legacy.scheduledAt) : null,
         legacy.queuedAt ? new Date(legacy.queuedAt) : null,
         targetRun,
@@ -307,7 +306,8 @@ async function migrateOneLegacyJobMutating(
           w.error_message,
         );
       }
-      await conn.query(
+      await pgExecute(
+        conn,
         `INSERT INTO job_wallets (
           job_id, wallet_address, amount, status, signer_address, tx_hash, rpc_url, retry_count, error_message
         ) VALUES ${placeholders}`,
@@ -315,12 +315,12 @@ async function migrateOneLegacyJobMutating(
       );
     }
 
-    await conn.execute(`UPDATE airdrop_jobs SET migrated_to_queue = 1 WHERE id = ?`, [jobId]);
+    await pgExecute(conn, `UPDATE airdrop_jobs SET migrated_to_queue = TRUE WHERE id = ?`, [jobId]);
 
-    await conn.commit();
+    await conn.query("COMMIT");
     return { jobId, walletCount: walletRows.length, expected };
   } catch (e) {
-    await conn.rollback();
+    await conn.query("ROLLBACK");
     throw e;
   }
 }
@@ -338,26 +338,26 @@ export async function migrateLegacyJobsToQueue(options: MigrateLegacyJobsOptions
   let jobsSkipped = 0;
   let walletsInserted = 0;
 
-  const pool = await getMysqlPool();
+  const pool = await getPostgresPool();
 
-  let sql = `SELECT id FROM airdrop_jobs WHERE COALESCE(migrated_to_queue, 0) = 0`;
+  let sql = `SELECT id FROM airdrop_jobs WHERE COALESCE(migrated_to_queue, FALSE) = FALSE`;
   const params: Array<string | number> = [];
   if (jobIdFilter) {
     sql += ` AND id = ?`;
     params.push(jobIdFilter);
   }
-  sql += ` ORDER BY createdAt ASC LIMIT ?`;
+  sql += ` ORDER BY "createdAt" ASC LIMIT ?`;
   params.push(limit);
 
-  const [idRows] = await pool.execute<RowDataPacket[]>(sql, params);
-  const ids = idRows.map((r) => String((r as { id: string }).id));
+  const idRows = await pgQuery<{ id: string }>(pool, sql, params);
+  const ids = idRows.map((r) => String(r.id));
 
   console.log(`[migrate] candidates: ${ids.length} legacy job(s)${dryRun ? " (dry-run)" : ""}`);
 
   for (const id of ids) {
     try {
       if (dryRun) {
-        const [legacyRows] = await pool.execute<JobRow[]>(`SELECT * FROM airdrop_jobs WHERE id = ?`, [id]);
+        const legacyRows = await pgQuery<JobRow>(pool, `SELECT * FROM airdrop_jobs WHERE id = ?`, [id]);
         const legacy = legacyRows[0];
         if (!legacy || Boolean(legacy.migrated_to_queue)) {
           jobsSkipped++;
@@ -378,7 +378,7 @@ export async function migrateLegacyJobsToQueue(options: MigrateLegacyJobsOptions
         continue;
       }
 
-      const conn = await pool.getConnection();
+      const conn = await pool.connect();
       try {
         const result = await migrateOneLegacyJobMutating(conn, id, chunkSize);
         if (!result) {

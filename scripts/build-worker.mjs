@@ -22,7 +22,6 @@ await build({
   outfile,
   sourcemap: true,
   legalComments: "none",
-  external: ["mysql2"],
   alias: {
     "@": path.join(root, "src"),
   },

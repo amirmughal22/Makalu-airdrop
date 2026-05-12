@@ -1,5 +1,5 @@
 /**
- * Normalized MySQL queue worker — production entry for PM2 / Plesk.
+ * Normalized PostgreSQL queue worker — production entry for PM2 / Coolify.
  * Loads `.env` without requiring `node --env-file` (see {@link bootstrapProductionEnv}).
  *
  * Production bundle: `npm run build:worker` → `node dist/worker/airdrop-queue-worker.cjs`
@@ -109,9 +109,9 @@ void (async () => {
     );
   }
 
-  const { getMysqlPool } = await import("../src/lib/mysql");
-  const pool = await getMysqlPool();
-  console.log("[airdrop-queue-worker] MySQL pool ready");
+  const { getPostgresPool } = await import("../src/lib/postgres");
+  const pool = await getPostgresPool();
+  console.log("[airdrop-queue-worker] PostgreSQL pool ready");
 
   const strict = process.env.AIRDROP_QUEUE_STRICT_STARTUP?.trim() === "true";
   const { validateNormalizedQueueIndexes, validateQueueRuntimeRowPresent } = await import(

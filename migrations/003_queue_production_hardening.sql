@@ -1,5 +1,5 @@
 -- Production hardening: retry scheduling, claim index, worker heartbeats.
--- Applied automatically via ensureQueueJobsSchema (mysql-queue-schema.ts) on app/worker boot.
+-- Applied automatically via ensureQueueJobsSchema (postgres-queue-schema.ts) on app/worker boot.
 
 SET NAMES utf8mb4;
 

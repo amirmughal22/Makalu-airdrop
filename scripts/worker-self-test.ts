@@ -49,7 +49,7 @@ void (async () => {
     ),
   );
   try {
-    const pool = await (await import("../src/lib/mysql")).getMysqlPool();
+    const pool = await (await import("../src/lib/postgres")).getPostgresPool();
     await pool.query("SELECT 1 AS ok");
     rows.push(row("MySQL ping", true, "SELECT 1"));
   } catch (e) {

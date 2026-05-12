@@ -1,6 +1,4 @@
-import type { RowDataPacket } from "mysql2";
-import type { ResultSetHeader } from "mysql2";
-import { getMysqlPool } from "./mysql";
+import { getPostgresPool, pgExecute, pgQuery } from "./postgres";
 import { refreshJobAggregates } from "./queue/job-queue-repo";
 
 /** Same semantics as `HistoryStatusFilter` in job-service (avoid circular imports). */
@@ -21,7 +19,7 @@ function historyWhereClause(filter: NormalizedHistoryFilter): string {
   }
 }
 
-export type NormalizedJobListRow = RowDataPacket & {
+export type NormalizedJobListRow = Record<string, unknown> & {
   id: string;
   owner: string;
   status: string;
@@ -58,13 +56,14 @@ export async function countNormalizedJobsForOwner(
   ownerLower: string,
   statusFilter: NormalizedHistoryFilter,
 ): Promise<number> {
-  const pool = await getMysqlPool();
+  const pool = await getPostgresPool();
   const where = historyWhereClause(statusFilter);
-  const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT COUNT(*) AS c FROM jobs j WHERE j.owner = ? AND ${where}`,
+  const rows = await pgQuery<{ c: string }>(
+    pool,
+    `SELECT COUNT(*)::text AS c FROM jobs j WHERE j.owner = ? AND ${where}`,
     [ownerLower],
   );
-  return Number((rows[0] as { c: number }).c ?? 0);
+  return Number(rows[0]?.c ?? 0);
 }
 
 export async function listNormalizedJobsPage(
@@ -73,9 +72,10 @@ export async function listNormalizedJobsPage(
   limit: number,
   statusFilter: NormalizedHistoryFilter,
 ): Promise<NormalizedJobListRow[]> {
-  const pool = await getMysqlPool();
+  const pool = await getPostgresPool();
   const where = historyWhereClause(statusFilter);
-  const [rows] = await pool.execute<NormalizedJobListRow[]>(
+  const rows = await pgQuery<NormalizedJobListRow>(
+    pool,
     `SELECT j.* ${listSelectExtras()}
      FROM jobs j
      WHERE j.owner = ? AND ${where}
@@ -87,8 +87,9 @@ export async function listNormalizedJobsPage(
 }
 
 export async function listNormalizedActiveJobs(ownerLower: string, limit: number): Promise<NormalizedJobListRow[]> {
-  const pool = await getMysqlPool();
-  const [rows] = await pool.execute<NormalizedJobListRow[]>(
+  const pool = await getPostgresPool();
+  const rows = await pgQuery<NormalizedJobListRow>(
+    pool,
     `SELECT j.* ${listSelectExtras()}
      FROM jobs j
      WHERE j.owner = ?
@@ -106,16 +107,17 @@ export async function getNormalizedQueuePositionsForJobIds(
   nowIso: string,
 ): Promise<Map<string, number>> {
   if (jobIds.length === 0) return new Map();
-  const pool = await getMysqlPool();
+  const pool = await getPostgresPool();
   const placeholders = jobIds.map(() => "?").join(", ");
   const now = new Date(nowIso);
-  const [rows] = await pool.execute<RowDataPacket[]>(
+  const rows = await pgQuery<{ id: string; queue_position: string }>(
+    pool,
     `SELECT q.id,
       1 + (
-        SELECT COUNT(*)
+        SELECT COUNT(*)::int
         FROM jobs p
         WHERE p.status = 'queued'
-          AND p.paused = 0
+          AND NOT p.paused
           AND (p.scheduled_at IS NULL OR p.scheduled_at <= ?)
           AND (
             COALESCE(p.queued_at, p.created_at) < COALESCE(q.queued_at, q.created_at)
@@ -133,7 +135,7 @@ export async function getNormalizedQueuePositionsForJobIds(
      FROM jobs q
      WHERE q.id IN (${placeholders})
        AND q.status = 'queued'
-       AND q.paused = 0
+       AND NOT q.paused
        AND (q.scheduled_at IS NULL OR q.scheduled_at <= ?)`,
     [now, ...jobIds, now],
   );
@@ -144,7 +146,7 @@ export async function getNormalizedQueuePositionsForJobIds(
   return m;
 }
 
-export type WalletAggRow = RowDataPacket & {
+export type WalletAggRow = {
   total: number;
   completed: number;
   failed: number;
@@ -153,32 +155,40 @@ export type WalletAggRow = RowDataPacket & {
 };
 
 export async function getWalletAggregates(jobId: string): Promise<WalletAggRow | null> {
-  const pool = await getMysqlPool();
-  const [rows] = await pool.execute<WalletAggRow[]>(
+  const pool = await getPostgresPool();
+  const rows = await pgQuery<Record<string, unknown>>(
+    pool,
     `SELECT
-       COUNT(*) AS total,
-       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
-       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
-       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
-       SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing
+       COUNT(*)::int AS total,
+       COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)::int AS completed,
+       COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)::int AS failed,
+       COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0)::int AS pending,
+       COALESCE(SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END), 0)::int AS processing
      FROM job_wallets WHERE job_id = ?`,
     [jobId],
   );
   const r = rows[0];
   if (!r) return null;
-  return r;
+  return {
+    total: Number(r.total),
+    completed: Number(r.completed),
+    failed: Number(r.failed),
+    pending: Number(r.pending),
+    processing: Number(r.processing),
+  };
 }
 
 export async function getNormalizedJobRow(jobId: string): Promise<NormalizedJobListRow | null> {
-  const pool = await getMysqlPool();
-  const [rows] = await pool.execute<NormalizedJobListRow[]>(
+  const pool = await getPostgresPool();
+  const rows = await pgQuery<NormalizedJobListRow>(
+    pool,
     `SELECT j.* ${listSelectExtras()} FROM jobs j WHERE j.id = ? LIMIT 1`,
     [jobId],
   );
   return rows[0] ?? null;
 }
 
-export type WalletPageRow = RowDataPacket & {
+export type WalletPageRow = {
   id: number;
   wallet_address: string;
   amount: string;
@@ -208,7 +218,7 @@ export async function countJobWalletsFiltered(params: {
   search?: string;
   txHash?: string;
 }): Promise<number> {
-  const pool = await getMysqlPool();
+  const pool = await getPostgresPool();
   const conditions: string[] = ["job_id = ?"];
   const vals: Array<string | number> = [params.jobId];
   if (params.status) {
@@ -224,15 +234,16 @@ export async function countJobWalletsFiltered(params: {
     vals.push(`%${params.search.trim()}%`);
   }
   const where = conditions.join(" AND ");
-  const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT COUNT(*) AS c FROM job_wallets WHERE ${where}`,
+  const rows = await pgQuery<{ c: string }>(
+    pool,
+    `SELECT COUNT(*)::text AS c FROM job_wallets WHERE ${where}`,
     vals,
   );
-  return Number((rows[0] as { c: number }).c ?? 0);
+  return Number(rows[0]?.c ?? 0);
 }
 
 export async function listJobWalletsPage(params: ListWalletsParams): Promise<{ rows: WalletPageRow[]; nextCursor: number | null }> {
-  const pool = await getMysqlPool();
+  const pool = await getPostgresPool();
   const limit = Math.min(500, Math.max(1, params.limit));
   const conditions: string[] = ["job_id = ?"];
   const vals: Array<string | number> = [params.jobId];
@@ -262,7 +273,8 @@ export async function listJobWalletsPage(params: ListWalletsParams): Promise<{ r
   if (useOffset) {
     const offset = Math.floor(Number(params.offset));
     vals.push(limit + 1, offset);
-    const [r] = await pool.execute<WalletPageRow[]>(
+    const r = await pgQuery<WalletPageRow>(
+      pool,
       `SELECT id, wallet_address, amount, status, signer_address, tx_hash, rpc_url, retry_count, error_message, updated_at
        FROM job_wallets
        WHERE ${where}
@@ -273,7 +285,8 @@ export async function listJobWalletsPage(params: ListWalletsParams): Promise<{ r
     rows = r;
   } else {
     vals.push(limit + 1);
-    const [r] = await pool.execute<WalletPageRow[]>(
+    const r = await pgQuery<WalletPageRow>(
+      pool,
       `SELECT id, wallet_address, amount, status, signer_address, tx_hash, rpc_url, retry_count, error_message, updated_at
        FROM job_wallets
        WHERE ${where}
@@ -305,7 +318,7 @@ export async function updateNormalizedJobMeta(
     targetRunCount: number;
   }>,
 ): Promise<void> {
-  const pool = await getMysqlPool();
+  const pool = await getPostgresPool();
   const sets: string[] = [];
   const vals: Array<string | number | Date | boolean | null> = [];
   if (patch.status !== undefined) {
@@ -314,7 +327,7 @@ export async function updateNormalizedJobMeta(
   }
   if (patch.paused !== undefined) {
     sets.push("paused = ?");
-    vals.push(patch.paused ? 1 : 0);
+    vals.push(patch.paused);
   }
   if (patch.queuedAt !== undefined) {
     sets.push("queued_at = ?");
@@ -334,16 +347,17 @@ export async function updateNormalizedJobMeta(
   }
   if (sets.length === 0) return;
   vals.push(jobId);
-  await pool.execute(`UPDATE jobs SET ${sets.join(", ")}, updated_at = CURRENT_TIMESTAMP(3) WHERE id = ?`, vals);
+  await pgExecute(pool, `UPDATE jobs SET ${sets.join(", ")}, updated_at = NOW() WHERE id = ?`, vals);
 }
 
 /** Full rerun: reset wallet rows and queue job. */
 export async function rerunNormalizedJob(jobId: string): Promise<void> {
-  const pool = await getMysqlPool();
-  const conn = await pool.getConnection();
+  const pool = await getPostgresPool();
+  const conn = await pool.connect();
   try {
-    await conn.beginTransaction();
-    await conn.execute(
+    await conn.query("BEGIN");
+    await pgExecute(
+      conn,
       `UPDATE job_wallets SET
          status = 'pending',
          tx_hash = NULL,
@@ -351,24 +365,25 @@ export async function rerunNormalizedJob(jobId: string): Promise<void> {
          error_message = NULL,
          assigned_worker = NULL,
          retry_count = 0,
-         updated_at = CURRENT_TIMESTAMP(3)
+         updated_at = NOW()
        WHERE job_id = ?`,
       [jobId],
     );
-    await conn.execute(
+    await pgExecute(
+      conn,
       `UPDATE jobs SET
          status = 'queued',
-         paused = 0,
-         queued_at = CURRENT_TIMESTAMP(3),
+         paused = FALSE,
+         queued_at = NOW(),
          scheduled_at = NULL,
          current_run = 1,
-         updated_at = CURRENT_TIMESTAMP(3)
+         updated_at = NOW()
        WHERE id = ?`,
       [jobId],
     );
-    await conn.commit();
+    await conn.query("COMMIT");
   } catch (e) {
-    await conn.rollback();
+    await conn.query("ROLLBACK");
     throw e;
   } finally {
     conn.release();
@@ -381,15 +396,16 @@ export async function rerunNormalizedJob(jobId: string): Promise<void> {
  * `loop_forever` is set (creation-time Loop checkbox). Paused/cancelled jobs never auto-rerun.
  */
 export async function maybeAutoRerunLoopJob(jobId: string): Promise<void> {
-  const pool = await getMysqlPool();
-  const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT status, paused, COALESCE(loop_forever, 0) AS lf FROM jobs WHERE id = ? LIMIT 1`,
+  const pool = await getPostgresPool();
+  const rows = await pgQuery<{ status: string; paused: boolean; lf: boolean }>(
+    pool,
+    `SELECT status, paused, COALESCE(loop_forever, FALSE) AS lf FROM jobs WHERE id = ? LIMIT 1`,
     [jobId],
   );
-  const r = rows[0] as { status?: string; paused?: number; lf?: number } | undefined;
+  const r = rows[0];
   if (!r) return;
-  if (!Number(r.lf)) return;
-  if (Number(r.paused)) return;
+  if (!r.lf) return;
+  if (r.paused) return;
   const st = String(r.status);
   if (st !== "completed" && st !== "failed") return;
   await rerunNormalizedJob(jobId);
@@ -397,12 +413,13 @@ export async function maybeAutoRerunLoopJob(jobId: string): Promise<void> {
 
 /** Queue route: reset every wallet row that is not completed (same as legacy non-success → queued). */
 export async function requeueIncompleteWallets(jobId: string): Promise<void> {
-  const pool = await getMysqlPool();
-  await pool.execute(
+  const pool = await getPostgresPool();
+  await pgExecute(
+    pool,
     `UPDATE job_wallets SET
        status = 'pending',
        assigned_worker = NULL,
-       updated_at = CURRENT_TIMESTAMP(3)
+       updated_at = NOW()
      WHERE job_id = ? AND status <> 'completed'`,
     [jobId],
   );
@@ -410,8 +427,9 @@ export async function requeueIncompleteWallets(jobId: string): Promise<void> {
 }
 
 export async function retryFailedWalletsOnly(jobId: string): Promise<number> {
-  const pool = await getMysqlPool();
-  const [res] = await pool.execute<ResultSetHeader>(
+  const pool = await getPostgresPool();
+  const res = await pgExecute(
+    pool,
     `UPDATE job_wallets SET
        status = 'pending',
        retry_count = 0,
@@ -419,18 +437,19 @@ export async function retryFailedWalletsOnly(jobId: string): Promise<number> {
        tx_hash = NULL,
        rpc_url = NULL,
        assigned_worker = NULL,
-       updated_at = CURRENT_TIMESTAMP(3)
+       updated_at = NOW()
      WHERE job_id = ? AND status = 'failed'`,
     [jobId],
   );
   await refreshJobAggregates(jobId);
-  return res.affectedRows ?? 0;
+  return res.rowCount ?? 0;
 }
 
 export async function cancelNormalizedJob(jobId: string): Promise<void> {
-  const pool = await getMysqlPool();
-  await pool.execute(
-    `UPDATE jobs SET status = 'cancelled', paused = 1, updated_at = CURRENT_TIMESTAMP(3) WHERE id = ?`,
+  const pool = await getPostgresPool();
+  await pgExecute(
+    pool,
+    `UPDATE jobs SET status = 'cancelled', paused = TRUE, updated_at = NOW() WHERE id = ?`,
     [jobId],
   );
 }

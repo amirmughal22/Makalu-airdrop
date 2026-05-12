@@ -1,8 +1,7 @@
 import { existsSync, mkdirSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { userInfo } from "node:os";
-import type { RowDataPacket } from "mysql2";
-import type { Pool } from "mysql2/promise";
+import type { Pool } from "pg";
 import { isAirdropQueueV2EnvEnabled } from "./config";
 
 export function isRuntimeQueueDiagEnabled(): boolean {
@@ -20,19 +19,19 @@ export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS jobId
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
        WHERE jw.status = 'pending'
-         AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= CURRENT_TIMESTAMP(3))
+         AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
          AND jw.retry_count < ?
          AND j.status IN ('queued', 'running')
-         AND j.paused = 0
+         AND NOT j.paused
        ORDER BY jw.job_id, jw.id
        LIMIT ?`;
 
 export function maskDatabaseUrlHostDb(url: string): string {
   try {
-    const normalized = url.replace(/^mysql:\/\//i, "http://");
+    const normalized = url.replace(/^postgres(ql)?:\/\//i, "http://");
     const u = new URL(normalized);
     const db = decodeURIComponent(u.pathname.replace(/^\//, "") || "").split("/")[0] || "?";
-    return `${u.hostname}:${u.port || "3306"}/${db}`;
+    return `${u.hostname}:${u.port || "5432"}/${db}`;
   } catch {
     return "(unparseable)";
   }
@@ -159,14 +158,12 @@ export function printAndLogStartupDiagnostics(
   return p;
 }
 
-export function poolDiagnostics(pool: Pool): { connectionLimit?: number; freeConnections?: number; allConnections?: number } {
+export function poolDiagnostics(pool: Pool): { totalCount?: number; idleCount?: number; waitingCount?: number } {
   try {
-    const inner = (pool as unknown as { pool?: { config?: { connectionLimit?: number }; freeConnections?: unknown[]; allConnections?: unknown[] } }).pool;
-    if (!inner) return {};
     return {
-      connectionLimit: inner.config?.connectionLimit,
-      freeConnections: inner.freeConnections?.length,
-      allConnections: inner.allConnections?.length,
+      totalCount: pool.totalCount,
+      idleCount: pool.idleCount,
+      waitingCount: pool.waitingCount,
     };
   } catch {
     return {};
@@ -174,13 +171,13 @@ export function poolDiagnostics(pool: Pool): { connectionLimit?: number; freeCon
 }
 
 export async function sessionIsolation(
-  conn: { execute: (sql: string) => Promise<[RowDataPacket[], unknown]> },
+  conn: { query: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }> },
 ): Promise<string | undefined> {
   try {
-    const [rows] = await conn.execute(
-      "SELECT @@SESSION.transaction_isolation AS iso, @@SESSION.transaction_read_only AS ro",
+    const { rows } = await conn.query(
+      "SELECT current_setting('transaction_isolation') AS iso, current_setting('transaction_read_only') AS ro",
     );
-    const r = rows[0] as { iso?: string; ro?: number } | undefined;
+    const r = rows[0] as { iso?: string; ro?: string } | undefined;
     if (!r) return undefined;
     return `${r.iso ?? "?"} read_only=${r.ro ?? "?"}`;
   } catch {

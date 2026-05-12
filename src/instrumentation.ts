@@ -14,8 +14,8 @@ export async function register() {
   await refreshQueueRuntimeCache();
 
   try {
-    const { getMysqlPool } = await import("@/lib/mysql");
-    const pool = await getMysqlPool();
+    const { getPostgresPool } = await import("@/lib/postgres");
+    const pool = await getPostgresPool();
     const { validateNormalizedQueueIndexes, validateQueueRuntimeRowPresent } = await import(
       "@/lib/queue/queue-startup-validation",
     );

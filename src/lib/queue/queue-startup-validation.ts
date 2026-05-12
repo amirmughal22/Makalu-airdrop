@@ -1,5 +1,5 @@
-import type { Pool } from "mysql2/promise";
-import type { RowDataPacket } from "mysql2";
+import type { Pool } from "pg";
+import { pgQuery } from "../postgres";
 
 export type QueueStartupValidationResult = {
   ok: boolean;
@@ -19,20 +19,20 @@ export async function validateNormalizedQueueIndexes(pool: Pool): Promise<QueueS
   const errors: string[] = [];
   const warnings: string[] = [];
   try {
-    const [dbRows] = await pool.execute<RowDataPacket[]>(`SELECT DATABASE() AS db`);
-    const schema = String((dbRows[0] as { db?: string })?.db ?? "").trim();
+    const schemaRows = await pgQuery<{ n: string }>(pool, `SELECT current_schema() AS n`);
+    const schema = String(schemaRows[0]?.n ?? "").trim();
     if (!schema) {
-      errors.push("Could not resolve current DATABASE() for index validation.");
+      errors.push("Could not resolve current_schema() for index validation.");
       return { ok: false, errors, warnings };
     }
 
     for (const { table, name } of REQUIRED_INDEXES) {
-      const [idx] = await pool.execute<RowDataPacket[]>(
-        `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+      const idx = await pgQuery<{ c: string }>(
+        pool,
+        `SELECT COUNT(*)::text AS c FROM pg_indexes WHERE schemaname = ? AND tablename = ? AND indexname = ?`,
         [schema, table, name],
       );
-      const c = Number((idx[0] as { c: number }).c ?? 0);
+      const c = Number(idx[0]?.c ?? 0);
       if (c < 1) {
         errors.push(`Missing index ${name} on ${table} — run app schema bootstrap / migrations.`);
       }
@@ -48,9 +48,7 @@ export async function validateQueueRuntimeRowPresent(pool: Pool): Promise<QueueS
   const errors: string[] = [];
   const warnings: string[] = [];
   try {
-    const [rows] = await pool.execute<RowDataPacket[]>(
-      `SELECT id FROM queue_runtime_settings WHERE id = 1`,
-    );
+    const rows = await pgQuery<{ id: number }>(pool, `SELECT id FROM queue_runtime_settings WHERE id = 1`);
     if (!rows.length) {
       warnings.push("queue_runtime_settings row id=1 missing — defaults apply until INSERT.");
     }

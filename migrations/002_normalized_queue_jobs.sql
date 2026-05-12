@@ -1,5 +1,5 @@
 -- Normalized queue jobs schema (MySQL 8+ / MariaDB 10.6+ with SKIP LOCKED).
--- Run manually or via app bootstrap (see src/lib/mysql.ts).
+-- Run manually or via app bootstrap (see src/lib/postgres.ts + postgres-queue-schema.ts).
 
 SET NAMES utf8mb4;
 
