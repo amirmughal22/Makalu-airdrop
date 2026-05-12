@@ -15,7 +15,7 @@ export function isSqlExplainEnabled(): boolean {
 }
 
 /** PUBLIC_CLAIM_SQL matches {@link claimWalletBatch} SELECT shape for EXPLAIN (no FOR UPDATE). */
-export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS jobId
+export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
        WHERE jw.status = 'pending'

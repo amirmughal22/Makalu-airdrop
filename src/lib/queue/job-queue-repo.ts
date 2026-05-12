@@ -393,9 +393,9 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
       const iso = await sessionIsolation(conn);
       console.info(`[claim-diag] tx_begin_ms=${Math.round(performance.now() - txT0)} isolation=${iso ?? "?"}`);
     }
-    const sql = `SELECT jw.id AS id, jw.job_id AS jobId, jw.wallet_address AS walletAddress, jw.amount AS amount,
-              jw.retry_count AS retryCount, jw.signer_address AS signerAddress,
-              j.owner AS owner, j.mode AS mode, j.token_address AS tokenAddress, j.chain_id AS chainId
+    const sql = `SELECT jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
+              jw.retry_count AS "retryCount", jw.signer_address AS "signerAddress",
+              j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
        WHERE jw.status = 'pending'
@@ -503,9 +503,9 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
   const conn = await pool.connect();
   try {
     await conn.query("BEGIN");
-    const sql = `SELECT jw.id AS id, jw.job_id AS jobId, jw.wallet_address AS walletAddress, jw.amount AS amount,
-              jw.retry_count AS retryCount, jw.signer_address AS signerAddress,
-              j.owner AS owner, j.mode AS mode, j.token_address AS tokenAddress, j.chain_id AS chainId
+    const sql = `SELECT jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
+              jw.retry_count AS "retryCount", jw.signer_address AS "signerAddress",
+              j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
        WHERE jw.status = 'pending'
