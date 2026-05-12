@@ -1,11 +1,10 @@
 /**
- * Builds process.env.DATABASE_URL from DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_DATABASE
- * (or DB_NAME) when DATABASE_URL is unset — plain Node scripts (`server.js`, `check-db-connection.js`).
+ * Builds `process.env.DATABASE_URL` from `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_DATABASE`
+ * (or `DB_NAME`) when `DATABASE_URL` is unset — Docker / Coolify split env.
  *
- * **Mirror** `src/lib/database-url-env.ts` (Next-bundled code imports that file instead of this one).
- * @module
+ * Keep in sync with `database-url.js` (plain Node entrypoints still require that file).
  */
-function ensureDatabaseUrl() {
+export function ensureDatabaseUrl(): void {
   if (process.env.DATABASE_URL?.trim()) return;
 
   const host = process.env.DB_HOST?.trim();
@@ -20,5 +19,3 @@ function ensureDatabaseUrl() {
   const p = encodeURIComponent(password);
   process.env.DATABASE_URL = `postgresql://${u}:${p}@${host}:${port}/${database}`;
 }
-
-module.exports = { ensureDatabaseUrl };

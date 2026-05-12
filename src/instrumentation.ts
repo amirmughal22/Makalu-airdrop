@@ -1,12 +1,12 @@
+import { ensureDatabaseUrl } from "@/lib/database-url-env";
+
 export async function register() {
   if (process.env.NEXT_RUNTIME === "edge") return;
-  const { ensureDatabaseUrl } = require("../database-url.js") as { ensureDatabaseUrl: () => void };
   ensureDatabaseUrl();
+
   /** When `false`, run `npm run worker` separately so the site stays fast while many jobs run in parallel. */
-  if (process.env.AIRDROP_EMBEDDED_WORKER === "false") {
-    // still allow embedded normalized worker below
-  } else {
-    const { ensureJobQueueWorker } = require("@/lib/job-queue") as { ensureJobQueueWorker: () => void };
+  if (process.env.AIRDROP_EMBEDDED_WORKER !== "false") {
+    const { ensureJobQueueWorker } = await import("@/lib/job-queue");
     ensureJobQueueWorker();
   }
 

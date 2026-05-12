@@ -1,7 +1,7 @@
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
+import { ensureDatabaseUrl } from "./database-url-env";
 import { ensureQueueJobsSchema } from "./queue/postgres-queue-schema";
 
-const { ensureDatabaseUrl } = require("../../database-url.js") as { ensureDatabaseUrl: () => void };
 ensureDatabaseUrl();
 
 function envInt(name: string, fallback: number, min: number, max: number): number {
