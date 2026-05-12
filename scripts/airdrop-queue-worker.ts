@@ -86,6 +86,7 @@ void (async () => {
   const {
     collectQueueClaimBlockers,
     embeddedNormalizedQueueWorkerEnabled,
+    queueClaimBatchSize,
     queueWorkerPollMs,
     queueWorkerId,
   } = await import("../src/lib/queue/config");
@@ -135,6 +136,7 @@ void (async () => {
   fileLogger.log("info", "startup_config", {
     workerId,
     pollMs: queueWorkerPollMs(),
+    claimBatchSize: queueClaimBatchSize(),
     strictStartup: strict,
     projectRoot: PROJECT_ROOT,
     argv0: process.argv[0],
@@ -148,7 +150,7 @@ void (async () => {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   console.log(
-    `[airdrop-queue-worker] started workerId=${workerId} poll ~${queueWorkerPollMs()}ms · set AIRDROP_QUEUE_RUNTIME_DIAG=1 for per-claim SQL logs`,
+    `[airdrop-queue-worker] started workerId=${workerId} poll ~${queueWorkerPollMs()}ms batch ≤${queueClaimBatchSize()} · set AIRDROP_QUEUE_RUNTIME_DIAG=1 for per-claim SQL logs`,
   );
 
   await runAirdropQueueWorker(abort.signal, {

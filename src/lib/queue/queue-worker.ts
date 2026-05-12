@@ -82,7 +82,7 @@ export type RunAirdropQueueWorkerOptions = {
   onStopped?: () => Promise<void>;
 };
 
-/** Main loop for normalized MySQL workers (`npm run worker:queue` or embedded). */
+/** Main loop for normalized queue workers (`npm run worker:queue` or embedded). */
 export async function runAirdropQueueWorker(
   signal?: AbortSignal,
   options?: RunAirdropQueueWorkerOptions,
@@ -201,22 +201,35 @@ export async function runAirdropQueueWorker(
     }
 
     const baseParallel = maxParallelTxsPerWave();
-    /** One job per batch → parallel TXs update the same `jobs` row → InnoDB deadlocks; serialize. */
-    const singleJobBatch = new Set(batch.map((r) => r.jobId)).size <= 1;
-    const parallel = singleJobBatch
-      ? 1
-      : queueAdaptiveParallelEnabled() && batch.length > 0
-        ? Math.max(
-            1,
-            Math.round(baseParallel * (1 - 0.65 * Math.min(1, lastBatchFailRatio))),
-          )
-        : baseParallel;
+    const parallelWave =
+      batch.length > 0 && queueAdaptiveParallelEnabled()
+        ? Math.max(1, Math.round(baseParallel * (1 - 0.65 * Math.min(1, lastBatchFailRatio))))
+        : Math.max(1, baseParallel);
+
+    /** One row per signer per wave — avoids EVM nonce races; multiple signers still run in parallel. */
+    const bySigner = new Map<string, ClaimedWalletRow[]>();
+    for (const r of batch) {
+      const key = `${r.owner.toLowerCase()}:${(r.signerAddress ?? "").toLowerCase()}`;
+      if (!bySigner.has(key)) bySigner.set(key, []);
+      bySigner.get(key)!.push(r);
+    }
+    const signerQueues = [...bySigner.values()];
+
     const chunkGap = interChunkDelayMs();
     let batchOk = 0;
     let batchFail = 0;
-    for (let c = 0; c < batch.length; c += parallel) {
-      const slice = batch.slice(c, c + parallel);
-      const outcomes = await Promise.all(slice.map((row) => processClaimedWalletRow(row)));
+    let rr = 0;
+    while (signerQueues.some((q) => q.length)) {
+      const wave: ClaimedWalletRow[] = [];
+      for (let i = 0; i < signerQueues.length && wave.length < parallelWave; i++) {
+        const idx = (rr + i) % signerQueues.length;
+        const q = signerQueues[idx]!;
+        if (q.length) wave.push(q.shift()!);
+      }
+      if (!wave.length) break;
+      rr = (rr + 1) % signerQueues.length;
+
+      const outcomes = await Promise.all(wave.map((row) => processClaimedWalletRow(row)));
       for (const ok of outcomes) {
         if (ok) {
           batchOk++;
@@ -226,7 +239,7 @@ export async function runAirdropQueueWorker(
           cumulativeFail++;
         }
       }
-      if (c + parallel < batch.length && chunkGap > 0) await sleep(chunkGap);
+      if (signerQueues.some((q) => q.length) && chunkGap > 0) await sleep(chunkGap);
     }
     lastBatchFailRatio = batch.length ? batchFail / batch.length : 0;
     const jobIds = [...new Set(batch.map((r) => r.jobId))];

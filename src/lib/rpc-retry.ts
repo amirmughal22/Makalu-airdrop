@@ -32,7 +32,7 @@ export function sleep(ms: number): Promise<void> {
 export function maxParallelTxsPerWave(): number {
   const db = getQueueRuntimeFlagsSync().maxParallelTxs;
   if (typeof db === "number" && db >= 1 && db <= 20) return db;
-  return envInt("AIRDROP_MAX_PARALLEL_TXS", 3, 1, 20);
+  return envInt("AIRDROP_MAX_PARALLEL_TXS", 6, 1, 20);
 }
 
 /** Max airdrop jobs running at once in this process. Dashboard 1–32; env fallback up to 64. */

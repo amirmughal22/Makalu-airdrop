@@ -4,7 +4,7 @@
  *
  *   node --env-file=.env scripts/bench-queue-claim.mjs
  *
- * Env: DATABASE_URL (postgresql://…), optional AIRDROP_QUEUE_BATCH_SIZE (default 20), AIRDROP_QUEUE_MAX_RETRIES (default 5).
+ * Env: DATABASE_URL (postgresql://…), optional AIRDROP_QUEUE_BATCH_SIZE (default 48), AIRDROP_QUEUE_MAX_RETRIES (default 5).
  */
 import pg from "pg";
 
@@ -16,7 +16,7 @@ if (!url || !/^postgres(ql)?:\/\//i.test(url)) {
 
 const batch = Math.min(
   500,
-  Math.max(1, parseInt(process.env.AIRDROP_QUEUE_BATCH_SIZE ?? "20", 10) || 20),
+  Math.max(1, parseInt(process.env.AIRDROP_QUEUE_BATCH_SIZE ?? "48", 10) || 48),
 );
 const maxRetries = Math.max(0, parseInt(process.env.AIRDROP_QUEUE_MAX_RETRIES ?? "5", 10) || 5);
 const maxAttempts = maxRetries + 1;

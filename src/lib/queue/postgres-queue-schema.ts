@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS queue_runtime_settings (
   processing_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   normalized_queue_v2 BOOLEAN NOT NULL DEFAULT TRUE,
   embedded_worker BOOLEAN NOT NULL DEFAULT TRUE,
-  max_parallel_txs SMALLINT NOT NULL DEFAULT 3,
+  max_parallel_txs SMALLINT NOT NULL DEFAULT 6,
   max_concurrent_jobs SMALLINT NOT NULL DEFAULT 5,
   embedded_worker_count SMALLINT NOT NULL DEFAULT 1,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS queue_runtime_settings (
     ["42701"],
   );
   await ignorePgCodes(
-    () => pool.query(`ALTER TABLE queue_runtime_settings ADD COLUMN IF NOT EXISTS max_parallel_txs SMALLINT NOT NULL DEFAULT 3`),
+    () => pool.query(`ALTER TABLE queue_runtime_settings ADD COLUMN IF NOT EXISTS max_parallel_txs SMALLINT NOT NULL DEFAULT 6`),
     ["42701"],
   );
   await ignorePgCodes(
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS queue_runtime_settings (
 
   await pool.query(`
 INSERT INTO queue_runtime_settings (id, processing_enabled, normalized_queue_v2, embedded_worker, max_parallel_txs, max_concurrent_jobs, embedded_worker_count)
-VALUES (1, TRUE, TRUE, TRUE, 3, 5, 1)
+VALUES (1, TRUE, TRUE, TRUE, 6, 5, 1)
 ON CONFLICT (id) DO NOTHING`);
 
   await pool.query(`

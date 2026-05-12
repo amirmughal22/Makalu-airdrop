@@ -1,4 +1,4 @@
-/** Normalized MySQL queue (SKIP LOCKED workers). Enable with AIRDROP_QUEUE_V2=true */
+/** Normalized PostgreSQL queue (SKIP LOCKED workers). Enable with AIRDROP_QUEUE_V2=true */
 
 import { getQueueRuntimeFlagsSync } from "./queue-runtime-settings";
 
@@ -29,9 +29,9 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
   return Math.min(max, Math.max(min, n));
 }
 
-/** Wallets claimed per transaction (default 20). */
+/** Wallets claimed per worker transaction (default 48; cap 500). */
 export function queueClaimBatchSize(): number {
-  return envInt("AIRDROP_QUEUE_BATCH_SIZE", 20, 1, 500);
+  return envInt("AIRDROP_QUEUE_BATCH_SIZE", 48, 1, 500);
 }
 
 /** Rows per INSERT when creating a job (default 1000). */
@@ -55,7 +55,7 @@ export function queueStaleProcessingMs(): number {
 }
 
 export function queueWorkerPollMs(): number {
-  return envInt("AIRDROP_QUEUE_WORKER_POLL_MS", 750, 50, 60_000);
+  return envInt("AIRDROP_QUEUE_WORKER_POLL_MS", 500, 50, 60_000);
 }
 
 /** Extra sleep after each claimed batch (reduces RPC/DB pressure under load). Default 0. */
@@ -71,7 +71,7 @@ export function queueGlobalPaused(): boolean {
 
 /**
  * Human-readable reasons the embedded worker cannot start (empty array = OK).
- * Call after `refreshQueueRuntimeCache()` so DB-backed flags match MySQL.
+ * Call after `refreshQueueRuntimeCache()` so DB-backed flags match Postgres / Redis cache.
  */
 export function collectEmbeddedWorkerBlockers(): string[] {
   try {
@@ -82,7 +82,7 @@ export function collectEmbeddedWorkerBlockers(): string[] {
   const reasons: string[] = [];
   if (!isAirdropQueueV2Enabled()) {
     if (!isAirdropQueueV2EnvEnabled()) reasons.push("AIRDROP_QUEUE_V2 is not true");
-    else reasons.push("normalized_queue_v2 is off in queue_runtime_settings (MySQL id=1)");
+    else reasons.push("normalized_queue_v2 is off in queue_runtime_settings (id=1)");
   }
   const v = process.env.AIRDROP_EMBEDDED_QUEUE_WORKER?.trim().toLowerCase();
   if (v === "0" || v === "false" || v === "no") {
@@ -94,7 +94,7 @@ export function collectEmbeddedWorkerBlockers(): string[] {
     );
   }
   if (!getQueueRuntimeFlagsSync().embeddedWorker) {
-    reasons.push("embedded_worker is off in queue_runtime_settings (MySQL id=1)");
+    reasons.push("embedded_worker is off in queue_runtime_settings (id=1)");
   }
   return reasons;
 }
@@ -110,13 +110,13 @@ export function embeddedNormalizedQueueWorkerEnabled(): boolean {
 
 /**
  * Reasons {@link claimWalletBatch} returns no rows before hitting SQL (same checks as the worker loop).
- * Call after {@link refreshQueueRuntimeCache} so flags match MySQL.
+ * Call after {@link refreshQueueRuntimeCache} so flags match Postgres / Redis cache.
  */
 export function collectQueueClaimBlockers(): string[] {
   const reasons: string[] = [];
   if (!isAirdropQueueV2Enabled()) {
     if (!isAirdropQueueV2EnvEnabled()) reasons.push("AIRDROP_QUEUE_V2 is not true");
-    else reasons.push("normalized_queue_v2 is off in queue_runtime_settings (MySQL id=1)");
+    else reasons.push("normalized_queue_v2 is off in queue_runtime_settings (id=1)");
   }
   if (queueGlobalPaused()) reasons.push("AIRDROP_QUEUE_GLOBAL_PAUSED is true");
   if (!getQueueRuntimeFlagsSync().processingEnabled) {

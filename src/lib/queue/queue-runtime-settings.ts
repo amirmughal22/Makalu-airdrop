@@ -22,7 +22,7 @@ const DEFAULT_FLAGS: QueueRuntimeFlags = {
   processingEnabled: true,
   normalizedQueueV2: true,
   embeddedWorker: true,
-  maxParallelTxs: 3,
+  maxParallelTxs: 6,
   maxConcurrentJobs: 5,
   embeddedWorkerCount: 1,
 };
