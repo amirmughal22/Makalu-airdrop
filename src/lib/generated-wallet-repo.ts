@@ -71,7 +71,12 @@ export async function getBatchForOwner(
   return rows[0];
 }
 
-/** Worker: claim one pending batch (SKIP LOCKED). Returns null if none. */
+/**
+ * Worker: claim the next batch that needs generation.
+ * - `pending` — never started.
+ * - `running` with `inserted_wallets < total_wallets` — interrupted (process crash / Ctrl+C); resumes from stored progress.
+ * Uses `FOR UPDATE SKIP LOCKED`. Pair with a per-batch advisory lock in the worker so two processes never insert concurrently.
+ */
 export async function claimNextPendingBatch(): Promise<GeneratedBatchListRow | null> {
   const pool = await getPostgresPool();
   const rows = await pgQuery<GeneratedBatchListRow>(
@@ -81,7 +86,11 @@ export async function claimNextPendingBatch(): Promise<GeneratedBatchListRow | n
      WHERE b.id = (
        SELECT id FROM generated_wallet_batches
        WHERE status = 'pending'
-       ORDER BY created_at ASC
+          OR (status = 'running' AND inserted_wallets < total_wallets)
+       ORDER BY
+         CASE WHEN status = 'running' AND inserted_wallets < total_wallets THEN 0 ELSE 1 END,
+         updated_at ASC NULLS LAST,
+         created_at ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
@@ -89,6 +98,30 @@ export async function claimNextPendingBatch(): Promise<GeneratedBatchListRow | n
                b.created_at, b.updated_at, b.completed_at, b.error`,
   );
   return rows[0] ?? null;
+}
+
+/**
+ * Mark an interrupted batch as `pending` again so a wallet worker can pick it up (same as automatic resume, but immediate).
+ * Only when status is `running` and generation is incomplete. Idempotent if already `pending` with same progress.
+ */
+export async function requeueInterruptedBatchForOwner(
+  batchId: string,
+  ownerLower: string,
+): Promise<{ ok: true } | { ok: false; code: "not_found" | "not_resumable" }> {
+  const row = await getBatchForOwner(batchId, ownerLower);
+  if (!row) return { ok: false, code: "not_found" };
+  if (row.status !== "running" || row.inserted_wallets >= row.total_wallets) {
+    return { ok: false, code: "not_resumable" };
+  }
+  const pool = await getPostgresPool();
+  await pgExecute(
+    pool,
+    `UPDATE generated_wallet_batches
+     SET status = 'pending', error = NULL, completed_at = NULL, updated_at = NOW()
+     WHERE id = ?::uuid AND owner = ?`,
+    [batchId, ownerLower],
+  );
+  return { ok: true };
 }
 
 export async function bumpBatchInserted(batchId: string, delta: number): Promise<void> {

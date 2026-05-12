@@ -5,8 +5,9 @@ Large recipient lists (100k+) are stored in **`generated_wallet_batches`** and *
 ## Flow
 
 1. **Dashboard → Wallet batches** — create a batch (name + count). Status starts as `pending`.
-2. Run **`npm run wallets:generate`** on the server (Coolify worker or PM2). The process claims pending batches with **`FOR UPDATE SKIP LOCKED`**, inserts keys in chunks, updates progress, then sets status **`completed`** (or **`failed`**).
-3. **Airdrop configuration** — choose *Saved PostgreSQL wallet batch*, pick the batch, **from** / **to** indices (1-based inclusive), uniform amount per recipient, distributor signers, then **Create Batch Job**.
+2. Run **`npm run wallets:generate`** on the server (Coolify worker or PM2). The worker claims batches that are **`pending`** or **`running` with partial progress** (resume after crash, deploy, or Ctrl+C) using **`FOR UPDATE SKIP LOCKED`**, then takes a **per-batch PostgreSQL advisory lock** so two wallet processes never insert into the same batch concurrently. It inserts keys in chunks, updates progress, then sets status **`completed`** (or **`failed`**).
+3. **Stuck `running`?** Restart `npm run wallets:generate` — it will pick up incomplete batches. Optionally **`POST /api/airdrop/wallet-batches/{id}/resume`** (or the Dashboard **Resume** button) sets an interrupted batch to **`pending`** again for the same effect.
+4. **Airdrop configuration** — choose *Saved PostgreSQL wallet batch*, pick the batch, **from** / **to** indices (1-based inclusive), uniform amount per recipient, distributor signers, then **Create Batch Job**.
 
 ## Environment
 

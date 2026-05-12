@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { ListPagination } from "@/components/ui/list-pagination";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertCircle } from "lucide-react";
+import { readResponseJson } from "@/lib/read-response-json";
 
 const SESSION_KEY = "litho-airdrop-session";
 
@@ -74,8 +75,8 @@ export default function WalletBatchesDashboard() {
     setError("");
     try {
       const res = await fetch(`/api/airdrop/wallet-batches?page=${page}`, { headers: headers() });
-      const data = (await res.json()) as { batches?: BatchRow[]; total?: number; error?: string };
-      if (!res.ok) throw new Error(data.error || "Failed to load batches");
+      const data = await readResponseJson<{ batches?: BatchRow[]; total?: number; error?: string }>(res);
+      if (!res.ok) throw new Error(data.error || `Failed to load batches (${res.status})`);
       setBatches(data.batches ?? []);
       setTotal(Number(data.total ?? 0));
     } catch (e) {
@@ -98,8 +99,8 @@ export default function WalletBatchesDashboard() {
     if (!token) return;
     try {
       const res = await fetch(`/api/airdrop/wallet-batches/${id}`, { headers: headers() });
-      const data = (await res.json()) as { batch?: BatchRow; error?: string };
-      if (!res.ok) throw new Error(data.error || "Not found");
+      const data = await readResponseJson<{ batch?: BatchRow; error?: string }>(res);
+      if (!res.ok) throw new Error(data.error || `Not found (${res.status})`);
       if (data.batch) setDetail(data.batch as unknown as BatchRow);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Detail failed");
@@ -113,8 +114,8 @@ export default function WalletBatchesDashboard() {
       `/api/airdrop/wallet-batches/${selectedId}/wallets?page=${wPage}&limit=${wLimit}${q}`,
       { headers: headers() },
     );
-    const data = (await res.json()) as { wallets?: WalletRow[]; total?: number; error?: string };
-    if (!res.ok) throw new Error(data.error || "Failed to load wallets");
+    const data = await readResponseJson<{ wallets?: WalletRow[]; total?: number; error?: string }>(res);
+    if (!res.ok) throw new Error(data.error || `Failed to load wallets (${res.status})`);
     setWallets(data.wallets ?? []);
     setWTotal(Number(data.total ?? 0));
   }, [token, selectedId, wPage, wSearch, headers]);
@@ -138,13 +139,34 @@ export default function WalletBatchesDashboard() {
         headers: headers(),
         body: JSON.stringify({ name: newName.trim(), totalWallets: n }),
       });
-      const data = (await res.json()) as { error?: string; batchId?: string };
-      if (!res.ok) throw new Error(data.error || "Create failed");
+      const data = await readResponseJson<{ error?: string; batchId?: string }>(res);
+      if (!res.ok) throw new Error(data.error || `Create failed (${res.status})`);
       setNewName("");
       setNewCount("1000");
       await loadBatches();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resumeBatch(id: string) {
+    if (!token) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/airdrop/wallet-batches/${id}/resume`, {
+        method: "POST",
+        headers: headers(),
+        body: "{}",
+      });
+      const data = await readResponseJson<{ error?: string; message?: string }>(res);
+      if (!res.ok) throw new Error(data.error || `Resume failed (${res.status})`);
+      await loadBatches();
+      if (selectedId === id) await openDetail(id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Resume failed");
     } finally {
       setBusy(false);
     }
@@ -230,9 +252,22 @@ export default function WalletBatchesDashboard() {
                       {new Date(b.createdAt).toLocaleString()}
                     </div>
                   </div>
-                  <Button type="button" variant="outline" className="h-8 rounded-xl px-3 text-xs" onClick={() => void openDetail(b.id)}>
-                    View
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    {b.status === "running" && b.insertedWallets < b.totalWallets ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="h-8 rounded-xl px-3 text-xs"
+                        disabled={busy}
+                        onClick={() => void resumeBatch(b.id)}
+                      >
+                        Resume
+                      </Button>
+                    ) : null}
+                    <Button type="button" variant="outline" className="h-8 rounded-xl px-3 text-xs" onClick={() => void openDetail(b.id)}>
+                      View
+                    </Button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -268,6 +303,11 @@ export default function WalletBatchesDashboard() {
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
+              {detail.status === "running" && detail.insertedWallets < detail.totalWallets ? (
+                <Button type="button" variant="secondary" className="rounded-xl" disabled={busy || !token} onClick={() => void resumeBatch(detail.id)}>
+                  Resume generation
+                </Button>
+              ) : null}
               <Button type="button" variant="outline" className="rounded-xl" onClick={() => exportCsv(false)} disabled={!token}>
                 Export CSV (addresses)
               </Button>
@@ -312,8 +352,9 @@ export default function WalletBatchesDashboard() {
         <AlertTitle className="text-amber-900 dark:text-amber-100">Background worker</AlertTitle>
         <AlertDescription className="text-amber-900/90 dark:text-amber-100/90">
           After creating a batch, run <code className="rounded bg-white/70 px-1 font-mono dark:bg-black/40">npm run wallets:generate</code> on
-          the server until status becomes <strong>completed</strong>. Then create an airdrop job from Dashboard → Airdrop and choose &quot;Saved
-          PostgreSQL wallet batch&quot;.
+          the server until status becomes <strong>completed</strong>. If the process stops mid-batch, status may stay <strong>running</strong> —
+          restarting the command resumes automatically; you can also use <strong>Resume</strong> to set the batch back to <strong>pending</strong>.
+          Then create an airdrop job from Dashboard → Airdrop and choose &quot;Saved PostgreSQL wallet batch&quot;.
         </AlertDescription>
       </Alert>
     </div>

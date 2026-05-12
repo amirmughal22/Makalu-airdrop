@@ -39,6 +39,7 @@ import {
   rangeEndpointsFromAddresses,
 } from "@/lib/execution-wallet-range";
 import { FUND_DISTRIBUTE_MAX_RECIPIENTS } from "@/lib/fund-distribute";
+import { readResponseJson } from "@/lib/read-response-json";
 import { NetworkConfigGrid } from "@/components/NetworkConfigGrid";
 import { FloatingErrorNotice } from "@/components/FloatingErrorNotice";
 import { chainDisplayLabel, explorerUrlForChainId, lithoUiNetwork, rpcEndpointLabel } from "@/lib/chain";
@@ -523,7 +524,7 @@ export default function MakaluAirdropSuite({
       try {
         const res = await fetch("/api/airdrop/wallet-batches?page=1", { headers: authHeaders() });
         if (!res.ok) return;
-        const data = (await res.json()) as {
+        const data = await readResponseJson<{
           batches?: Array<{
             id: string;
             name: string;
@@ -531,7 +532,7 @@ export default function MakaluAirdropSuite({
             insertedWallets: number;
             status: string;
           }>;
-        };
+        }>(res);
         const list = (data.batches ?? []).filter((b) => b.status === "completed");
         if (!cancelled) setSavedBatches(list);
       } catch {
