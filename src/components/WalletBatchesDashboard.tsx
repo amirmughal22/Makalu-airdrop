@@ -344,12 +344,11 @@ export default function WalletBatchesDashboard() {
 
       <Alert className="rounded-2xl border-amber-200 bg-amber-50 dark:border-amber-900/40 dark:bg-amber-950/30">
         <AlertCircle className="h-4 w-4 text-amber-800 dark:text-amber-200" />
-        <AlertTitle className="text-amber-900 dark:text-amber-100">Background worker</AlertTitle>
+        <AlertTitle className="text-amber-900 dark:text-amber-100">Wallet generation</AlertTitle>
         <AlertDescription className="text-amber-900/90 dark:text-amber-100/90">
-          After creating a batch, run <code className="rounded bg-white/70 px-1 font-mono dark:bg-black/40">npm run wallets:generate</code> on
-          the server until status becomes <strong>completed</strong>. If the process stops mid-batch, status may stay <strong>running</strong> —
-          restarting the command resumes automatically; you can also use <strong>Resume</strong> to set the batch back to <strong>pending</strong>.
-          Then create an airdrop job from Dashboard → Airdrop and choose &quot;Saved wallets&quot;.
+          Batches usually fill automatically in the server process (embedded mode). Status becomes <strong>completed</strong> when all addresses are inserted. If a run stops mid-batch, status may stay <strong>running</strong> — a restart resumes; use <strong>Resume</strong> to set the batch back to <strong>pending</strong> if needed. If you disabled embedded generation (
+          <code className="rounded bg-white/70 px-1 font-mono dark:bg-black/40">AIRDROP_EMBEDDED_WALLET_GENERATION=false</code>
+          ), run <code className="rounded bg-white/70 px-1 font-mono dark:bg-black/40">npm run wallets:generate</code> on the server. Then create an airdrop job from Dashboard → Airdrop and choose &quot;Saved wallets&quot;.
         </AlertDescription>
       </Alert>
     </div>

@@ -42,4 +42,12 @@ export async function register() {
   if (blockers.length === 0) {
     console.info(`[instrumentation] Embedded normalized queue worker ON (${loops} loop(s))`);
   }
+
+  const { startEmbeddedWalletGenerationIfEligible, embeddedWalletGenerationEnabled } = await import(
+    "@/lib/generated-wallet-embedded-lifecycle",
+  );
+  startEmbeddedWalletGenerationIfEligible();
+  if (embeddedWalletGenerationEnabled()) {
+    console.info("[instrumentation] Embedded wallet batch generation ON (poll loop in this process)");
+  }
 }

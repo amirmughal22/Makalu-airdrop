@@ -3050,7 +3050,8 @@ export default function MakaluAirdropSuite({
                             <Link href="/dashboard/wallet-batches" className="underline">
                               Open Wallet batches
                             </Link>{" "}
-                            to generate storage and run <code className="rounded bg-slate-200 px-1 dark:bg-black">npm run wallets:generate</code>.
+                            to create a batch; addresses fill in automatically unless embedded generation is turned off in env — then run{" "}
+                            <code className="rounded bg-slate-200 px-1 dark:bg-black">npm run wallets:generate</code>.
                             Saved batch jobs use <strong>min / max per wallet</strong> from the tabs above when <em>Random per wallet</em> is selected; use{" "}
                             <em>Fixed total</em> for the same amount to every address in the index range.
                           </p>

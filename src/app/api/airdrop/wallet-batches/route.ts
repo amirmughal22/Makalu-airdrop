@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { countBatchesForOwner, insertPendingBatch, listBatchesForOwner } from "@/lib/generated-wallet-repo";
 import { walletGenerationMaxWallets } from "@/lib/generated-wallet-config";
+import { startEmbeddedWalletGenerationIfEligible } from "@/lib/generated-wallet-embedded-lifecycle";
 import { requireDistributorSession } from "@/lib/session";
 
 const PAGE_SIZE = 30;
@@ -52,10 +53,11 @@ export async function POST(request: Request) {
     }
 
     const id = await insertPendingBatch(session.address.toLowerCase(), name, n);
+    startEmbeddedWalletGenerationIfEligible();
     return NextResponse.json({
       batchId: id,
       message:
-        "Batch created with status pending. Run `npm run wallets:generate` (or a dedicated worker) to materialize wallets.",
+        "Batch created with status pending. Wallets materialize automatically while embedded generation is on (default). Set AIRDROP_EMBEDDED_WALLET_GENERATION=false if you use only `npm run wallets:generate` elsewhere.",
     });
   } catch (e) {
     return NextResponse.json(
