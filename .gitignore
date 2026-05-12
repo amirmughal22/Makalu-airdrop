@@ -11,6 +11,7 @@ logs/pm2-*.log
 !logs/.gitkeep
 *.tsbuildinfo
 .DS_Store
+.cursor
 
 # Persisted airdrop jobs (local / server)
 /data/
