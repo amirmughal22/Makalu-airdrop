@@ -9,9 +9,9 @@ async function ignorePgCodes(op: () => Promise<unknown>, codes: string[]): Promi
   }
 }
 
-/** `generated_wallet_batches` + `generated_wallets` — called from {@link getPostgresPool} bootstrap. */
-export async function ensureGeneratedWalletTables(pool: Pool): Promise<void> {
-  await pool.query(`
+/** `generated_wallet_batches` + `generated_wallets` — called from {@link getPostgresPool} bootstrap (single locked connection). */
+export async function ensureGeneratedWalletTables(db: Pick<Pool, "query">): Promise<void> {
+  await db.query(`
 CREATE TABLE IF NOT EXISTS generated_wallet_batches (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   owner VARCHAR(66) NOT NULL,
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS generated_wallet_batches (
   error TEXT NULL
 )`);
 
-  await pool.query(`
+  await db.query(`
 CREATE TABLE IF NOT EXISTS generated_wallets (
   id BIGSERIAL PRIMARY KEY,
   batch_id UUID NOT NULL REFERENCES generated_wallet_batches(id) ON DELETE CASCADE,
@@ -39,34 +39,34 @@ CREATE TABLE IF NOT EXISTS generated_wallets (
 )`);
 
   await ignorePgCodes(
-    () => pool.query(`ALTER TABLE generated_wallets ALTER COLUMN private_key_encrypted DROP NOT NULL`),
+    () => db.query(`ALTER TABLE generated_wallets ALTER COLUMN private_key_encrypted DROP NOT NULL`),
     ["42P01"],
   );
 
   await ignorePgCodes(
     () =>
-      pool.query(
+      db.query(
         `CREATE INDEX IF NOT EXISTS idx_generated_wallets_batch_index ON generated_wallets (batch_id, wallet_index)`,
       ),
     ["42P07"],
   );
   await ignorePgCodes(
     () =>
-      pool.query(
+      db.query(
         `CREATE INDEX IF NOT EXISTS idx_generated_wallets_address_lower ON generated_wallets (lower(address))`,
       ),
     ["42P07"],
   );
   await ignorePgCodes(
     () =>
-      pool.query(
+      db.query(
         `CREATE INDEX IF NOT EXISTS idx_generated_batches_owner_created ON generated_wallet_batches (owner, created_at DESC)`,
       ),
     ["42P07"],
   );
   await ignorePgCodes(
     () =>
-      pool.query(
+      db.query(
         `CREATE INDEX IF NOT EXISTS idx_generated_batches_status_created ON generated_wallet_batches (status, created_at)`,
       ),
     ["42P07"],

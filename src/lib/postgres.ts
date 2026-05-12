@@ -89,76 +89,95 @@ async function ignorePgCodes(op: () => Promise<unknown>, codes: string[]): Promi
 let pool: Pool | null = null;
 let schemaReady: Promise<void> | null = null;
 
+/** Serialize DDL across processes (Next, workers, PM2) — avoids PG `XX000` / tuple concurrently updated on catalog. */
+const SCHEMA_BOOTSTRAP_ADVISORY_CLASS = 8_420_003;
+const SCHEMA_BOOTSTRAP_ADVISORY_KEY = 1;
+
+type SchemaBootstrapConn = Pick<Pool, "query">;
+
 export async function getPostgresPool(): Promise<Pool> {
   const cfg = poolConfigFromDatabaseUrl();
   if (!cfg) throw new Error("DATABASE_URL is not configured");
   if (!pool) pool = new Pool(cfg);
   if (!schemaReady) {
     schemaReady = (async () => {
-      await pool!.query(CREATE_AIRDROP_JOBS_SQL);
-      await ignorePgCodes(() => pool!.query(`ALTER TABLE airdrop_jobs ADD COLUMN "chainId" INT NULL`), ["42701"]);
-      await ignorePgCodes(() => pool!.query(`ALTER TABLE airdrop_jobs ADD COLUMN "signerAddress" VARCHAR(66) NULL`), [
-        "42701",
-      ]);
-      await ignorePgCodes(() => pool!.query(`ALTER TABLE airdrop_jobs ADD COLUMN "scheduledAt" TIMESTAMPTZ NULL`), [
-        "42701",
-      ]);
-      await ignorePgCodes(() => pool!.query(`ALTER TABLE airdrop_jobs ADD COLUMN "queuedAt" TIMESTAMPTZ NULL`), [
-        "42701",
-      ]);
-      await ignorePgCodes(
-        () => pool!.query(`ALTER TABLE airdrop_jobs ADD COLUMN "signerAddressesJson" JSONB NULL`),
-        ["42701"],
-      );
-      await ignorePgCodes(() => pool!.query(`ALTER TABLE airdrop_jobs ADD COLUMN "targetRunCount" INT NULL`), [
-        "42701",
-      ]);
-      await ignorePgCodes(() => pool!.query(`ALTER TABLE airdrop_jobs ADD COLUMN "currentRun" INT NULL`), ["42701"]);
-      await ignorePgCodes(
-        () => pool!.query(`ALTER TABLE airdrop_jobs ADD COLUMN migrated_to_queue BOOLEAN NOT NULL DEFAULT FALSE`),
-        ["42701"],
-      );
-      await ignorePgCodes(
-        () => pool!.query(`CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_owner ON airdrop_jobs (owner)`),
-        ["42P07"],
-      );
-      await ignorePgCodes(
-        () =>
-          pool!.query(`CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_owner_created ON airdrop_jobs (owner, "createdAt")`),
-        ["42P07"],
-      );
-      await ignorePgCodes(
-        () =>
-          pool!.query(
-            `CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_owner_status_created ON airdrop_jobs (owner, status, "createdAt")`,
-          ),
-        ["42P07"],
-      );
-      await ignorePgCodes(
-        () =>
-          pool!.query(
-            `CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_queue ON airdrop_jobs (status, paused, "scheduledAt", "queuedAt", "createdAt", id)`,
-          ),
-        ["42P07"],
-      );
-      await ignorePgCodes(
-        () =>
-          pool!.query(`CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_running_updated ON airdrop_jobs (status, "updatedAt")`),
-        ["42P07"],
-      );
-      await ignorePgCodes(
-        () =>
-          pool!.query(
-            `CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_migrated ON airdrop_jobs (migrated_to_queue, status)`,
-          ),
-        ["42P07"],
-      );
-      await ensureQueueJobsSchema(pool!);
-      await ensureGeneratedWalletTables(pool!);
+      const conn = await pool!.connect();
+      try {
+        await conn.query(`SELECT pg_advisory_lock($1::integer, $2::integer)`, [
+          SCHEMA_BOOTSTRAP_ADVISORY_CLASS,
+          SCHEMA_BOOTSTRAP_ADVISORY_KEY,
+        ]);
+        try {
+          await runPostgresSchemaBootstrap(conn);
+        } finally {
+          await conn
+            .query(`SELECT pg_advisory_unlock($1::integer, $2::integer)`, [
+              SCHEMA_BOOTSTRAP_ADVISORY_CLASS,
+              SCHEMA_BOOTSTRAP_ADVISORY_KEY,
+            ])
+            .catch(() => {});
+        }
+      } finally {
+        conn.release();
+      }
     })();
   }
   await schemaReady;
   return pool;
+}
+
+async function runPostgresSchemaBootstrap(db: SchemaBootstrapConn): Promise<void> {
+  await db.query(CREATE_AIRDROP_JOBS_SQL);
+  await ignorePgCodes(() => db.query(`ALTER TABLE airdrop_jobs ADD COLUMN "chainId" INT NULL`), ["42701"]);
+  await ignorePgCodes(() => db.query(`ALTER TABLE airdrop_jobs ADD COLUMN "signerAddress" VARCHAR(66) NULL`), [
+    "42701",
+  ]);
+  await ignorePgCodes(() => db.query(`ALTER TABLE airdrop_jobs ADD COLUMN "scheduledAt" TIMESTAMPTZ NULL`), [
+    "42701",
+  ]);
+  await ignorePgCodes(() => db.query(`ALTER TABLE airdrop_jobs ADD COLUMN "queuedAt" TIMESTAMPTZ NULL`), [
+    "42701",
+  ]);
+  await ignorePgCodes(() => db.query(`ALTER TABLE airdrop_jobs ADD COLUMN "signerAddressesJson" JSONB NULL`), [
+    "42701",
+  ]);
+  await ignorePgCodes(() => db.query(`ALTER TABLE airdrop_jobs ADD COLUMN "targetRunCount" INT NULL`), ["42701"]);
+  await ignorePgCodes(() => db.query(`ALTER TABLE airdrop_jobs ADD COLUMN "currentRun" INT NULL`), ["42701"]);
+  await ignorePgCodes(
+    () => db.query(`ALTER TABLE airdrop_jobs ADD COLUMN migrated_to_queue BOOLEAN NOT NULL DEFAULT FALSE`),
+    ["42701"],
+  );
+  await ignorePgCodes(() => db.query(`CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_owner ON airdrop_jobs (owner)`), [
+    "42P07",
+  ]);
+  await ignorePgCodes(
+    () => db.query(`CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_owner_created ON airdrop_jobs (owner, "createdAt")`),
+    ["42P07"],
+  );
+  await ignorePgCodes(
+    () =>
+      db.query(
+        `CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_owner_status_created ON airdrop_jobs (owner, status, "createdAt")`,
+      ),
+    ["42P07"],
+  );
+  await ignorePgCodes(
+    () =>
+      db.query(
+        `CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_queue ON airdrop_jobs (status, paused, "scheduledAt", "queuedAt", "createdAt", id)`,
+      ),
+    ["42P07"],
+  );
+  await ignorePgCodes(
+    () => db.query(`CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_running_updated ON airdrop_jobs (status, "updatedAt")`),
+    ["42P07"],
+  );
+  await ignorePgCodes(
+    () => db.query(`CREATE INDEX IF NOT EXISTS idx_airdrop_jobs_migrated ON airdrop_jobs (migrated_to_queue, status)`),
+    ["42P07"],
+  );
+  await ensureQueueJobsSchema(db);
+  await ensureGeneratedWalletTables(db);
 }
 
 /** Legacy jobs table row shape (camelCase columns from `airdrop_jobs`). */
