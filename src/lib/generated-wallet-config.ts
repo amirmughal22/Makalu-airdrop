@@ -4,9 +4,9 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
   return Math.min(max, Math.max(min, n));
 }
 
-/** Rows inserted per INSERT inside the wallet generation worker (default 1000). */
+/** Rows inserted per INSERT inside the wallet generation worker (default 5000; clamp 100–5000 via env). */
 export function walletGenerationInsertChunk(): number {
-  return envInt("WALLET_GENERATION_BATCH_SIZE", 1000, 100, 5000);
+  return envInt("WALLET_GENERATION_BATCH_SIZE", 5000, 100, 5000);
 }
 
 /** Max wallets per batch row / per generation request (default 1_000_000). */

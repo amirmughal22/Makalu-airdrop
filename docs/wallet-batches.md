@@ -14,7 +14,7 @@ Large recipient lists (100k+) are stored in **`generated_wallet_batches`** and *
 |----------|---------|
 | `AIRDROP_WALLET_STORAGE_SECRET` | Preferred 32+ char secret for AES-256-GCM encryption of stored private keys. |
 | `AUTH_SECRET` | Fallback key material if `AIRDROP_WALLET_STORAGE_SECRET` is unset (min 16 chars). |
-| `WALLET_GENERATION_BATCH_SIZE` | Rows per insert in the generator worker (default 1000, max 5000). |
+| `WALLET_GENERATION_BATCH_SIZE` | Rows per insert in the generator worker (default **5000**, clamp 100–5000). |
 | `WALLET_GENERATION_MAX_WALLETS` | Cap on `totalWallets` when creating a batch via API (default 1_000_000). |
 
 ## SQL reference
