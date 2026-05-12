@@ -21,6 +21,7 @@ import {
   poolDiagnostics,
   sessionIsolation,
 } from "./runtime-queue-diag";
+import { getBatchForOwner } from "../generated-wallet-repo";
 import { getQueueRuntimeFlagsSync, refreshQueueRuntimeCache } from "./queue-runtime-settings";
 import type { ClaimedWalletRow, NormalizedJobRow } from "./types";
 
@@ -200,6 +201,140 @@ export async function createNormalizedJob(input: CreateNormalizedJobInput): Prom
     }
 
     await conn.query("COMMIT");
+  } catch (e) {
+    await conn.query("ROLLBACK");
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+export type CreateNormalizedJobFromBatchInput = {
+  jobId: string;
+  ownerLower: string;
+  name?: string | null;
+  mode: "native" | "erc20";
+  tokenAddress?: string | null;
+  chainId: number;
+  signerAddresses: string[];
+  /** Same decimal string for every recipient row. */
+  amount: string;
+  generatedBatchId: string;
+  /** Inclusive 1-based indices (first generated wallet = 1). */
+  fromWalletIndex: number;
+  toWalletIndex: number;
+  loopForever?: boolean;
+};
+
+const JOB_WALLET_FROM_GENERATED_CHUNK = 2500;
+
+/**
+ * Creates a draft job and fills `job_wallets` from `generated_wallets` (server-side SELECT for single signer;
+ * chunked copy for multiple signers with rotation).
+ * @returns number of wallet rows inserted
+ */
+export async function createNormalizedJobFromGeneratedBatch(input: CreateNormalizedJobFromBatchInput): Promise<number> {
+  const batch = await getBatchForOwner(input.generatedBatchId, input.ownerLower);
+  if (!batch) throw new Error("Wallet batch not found");
+  if (batch.status !== "completed") throw new Error("Wallet batch must be completed before creating a job from it");
+  if (batch.inserted_wallets < batch.total_wallets) throw new Error("Batch generation incomplete");
+
+  const fromIdx = Math.floor(Number(input.fromWalletIndex));
+  const toIdx = Math.floor(Number(input.toWalletIndex));
+  if (!Number.isFinite(fromIdx) || !Number.isFinite(toIdx)) throw new Error("Invalid wallet index range");
+  if (fromIdx < 1 || toIdx < fromIdx || toIdx > batch.total_wallets) {
+    throw new Error(`Invalid wallet index range (allowed 1–${batch.total_wallets}, inclusive)`);
+  }
+
+  const pool = await getPostgresPool();
+  const cntRows = await pgQuery<{ c: string }>(
+    pool,
+    `SELECT COUNT(*)::text AS c FROM generated_wallets
+     WHERE batch_id = ?::uuid AND wallet_index BETWEEN ? AND ?`,
+    [input.generatedBatchId, fromIdx, toIdx],
+  );
+  const cnt = Number(cntRows[0]?.c ?? 0);
+  const expected = toIdx - fromIdx + 1;
+  if (cnt !== expected) {
+    throw new Error(`Range not fully populated in database (expected ${expected} rows, found ${cnt})`);
+  }
+
+  const amt = Number(input.amount);
+  if (!Number.isFinite(amt) || amt < 0) throw new Error("Invalid uniform amount");
+
+  const distributors = [...new Set(input.signerAddresses.map((a) => a.toLowerCase()))];
+  if (!distributors.length) throw new Error("No distributor wallets");
+  const signersJson = JSON.stringify(distributors);
+
+  const conn = await pool.connect();
+  try {
+    await conn.query("BEGIN");
+    await pgExecute(
+      conn,
+      `INSERT INTO jobs (
+        id, owner, name, status, total_wallets, processed_wallets, failed_wallets,
+        mode, token_address, chain_id, paused, scheduled_at, queued_at,
+        target_run_count, current_run, loop_forever, signer_address, signer_addresses_json
+      ) VALUES (?, ?, ?, 'draft', ?, 0, 0, ?, ?, ?, FALSE, NULL, NULL, 1, 1, ?, ?, ?::jsonb)`,
+      [
+        input.jobId,
+        input.ownerLower,
+        input.name?.trim() || null,
+        expected,
+        input.mode,
+        input.mode === "erc20" ? input.tokenAddress ?? null : null,
+        input.chainId,
+        input.loopForever ?? false,
+        distributors[0] ?? null,
+        signersJson,
+      ],
+    );
+
+    if (distributors.length === 1) {
+      await pgExecute(
+        conn,
+        `INSERT INTO job_wallets (job_id, wallet_address, amount, status, signer_address, private_key)
+         SELECT ?::varchar(64), lower(gw.address)::varchar(66), ?::varchar(128), 'pending', ?::varchar(66),
+                convert_to(gw.private_key_encrypted, 'UTF8')
+         FROM generated_wallets gw
+         WHERE gw.batch_id = ?::uuid AND gw.wallet_index BETWEEN ? AND ?
+         ORDER BY gw.wallet_index`,
+        [input.jobId, String(input.amount), distributors[0]!, input.generatedBatchId, fromIdx, toIdx],
+      );
+    } else {
+      let cur = fromIdx;
+      while (cur <= toIdx) {
+        const hi = Math.min(cur + JOB_WALLET_FROM_GENERATED_CHUNK - 1, toIdx);
+        const slice = await pgQuery<{
+          wallet_index: number;
+          address: string;
+          private_key_encrypted: string;
+        }>(
+          conn,
+          `SELECT wallet_index, address, private_key_encrypted FROM generated_wallets
+           WHERE batch_id = ?::uuid AND wallet_index BETWEEN ? AND ?
+           ORDER BY wallet_index ASC`,
+          [input.generatedBatchId, cur, hi],
+        );
+        const placeholders = slice.map(() => "(?, ?, ?, 'pending', ?, convert_to(?, 'UTF8'))").join(", ");
+        const flat: unknown[] = [];
+        for (const row of slice) {
+          const signer = distributors[(row.wallet_index - fromIdx) % distributors.length]!;
+          flat.push(input.jobId, row.address.toLowerCase(), String(input.amount), signer, row.private_key_encrypted);
+        }
+        if (flat.length) {
+          await pgExecute(
+            conn,
+            `INSERT INTO job_wallets (job_id, wallet_address, amount, status, signer_address, private_key) VALUES ${placeholders}`,
+            flat,
+          );
+        }
+        cur = hi + 1;
+      }
+    }
+
+    await conn.query("COMMIT");
+    return expected;
   } catch (e) {
     await conn.query("ROLLBACK");
     throw e;

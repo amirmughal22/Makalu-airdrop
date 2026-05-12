@@ -19,6 +19,7 @@
     "worker:queue": "node ./node_modules/tsx/dist/cli.mjs scripts/airdrop-queue-worker.ts",
     "worker:queue:pm2": "npx pm2 start ecosystem.config.cjs",
     "worker:queue:pm2:stop": "npx pm2 stop makalu-queue-worker",
+    "wallets:generate": "node ./node_modules/tsx/dist/cli.mjs scripts/wallet-generation-worker.ts",
     "worker:queue:dist": "node dist/worker/airdrop-queue-worker.cjs",
     "worker:self-test": "node ./node_modules/tsx/dist/cli.mjs scripts/worker-self-test.ts",
     "queue:test": "node ./node_modules/tsx/dist/cli.mjs scripts/queue-test.ts",

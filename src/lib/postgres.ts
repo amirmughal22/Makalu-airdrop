@@ -1,5 +1,6 @@
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
 import { ensureDatabaseUrl } from "./database-url-env";
+import { ensureGeneratedWalletTables } from "./generated-wallet-schema";
 import { ensureQueueJobsSchema } from "./queue/postgres-queue-schema";
 
 ensureDatabaseUrl();
@@ -153,6 +154,7 @@ export async function getPostgresPool(): Promise<Pool> {
         ["42P07"],
       );
       await ensureQueueJobsSchema(pool!);
+      await ensureGeneratedWalletTables(pool!);
     })();
   }
   await schemaReady;

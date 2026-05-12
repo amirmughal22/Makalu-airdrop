@@ -249,9 +249,15 @@ type MakaluAirdropSuiteProps = {
   view?: "execution" | "dashboard";
   /** Route-driven dashboard panel; defaults to session when omitted. */
   dashboardSection?: DashboardSection;
+  /** Server-provided: PostgreSQL normalized jobs (`jobs` / `job_wallets`) enabled. */
+  normalizedJobsEnabled?: boolean;
 };
 
-export default function MakaluAirdropSuite({ view = "execution", dashboardSection }: MakaluAirdropSuiteProps) {
+export default function MakaluAirdropSuite({
+  view = "execution",
+  dashboardSection,
+  normalizedJobsEnabled = false,
+}: MakaluAirdropSuiteProps) {
   const dashboardMode = view === "dashboard";
   const dashSection: DashboardSection | null = dashboardMode
     ? dashboardSection ?? "session-wallet-connect"
@@ -345,6 +351,16 @@ export default function MakaluAirdropSuite({ view = "execution", dashboardSectio
   const [maxPerWallet, setMaxPerWallet] = useState("10");
   /** When set, the job automatically starts another cycle after each completion (until paused/cancelled). */
   const [jobLoopForever, setJobLoopForever] = useState(false);
+  /** Normalized jobs: use CSV/recipient list vs PostgreSQL saved wallet batch range. */
+  const [jobWalletSource, setJobWalletSource] = useState<"recipients" | "generated_batch">("recipients");
+  const [savedBatches, setSavedBatches] = useState<
+    { id: string; name: string; totalWallets: number; insertedWallets: number; status: string }[]
+  >([]);
+  const [selectedBatchId, setSelectedBatchId] = useState("");
+  const [batchRangeFrom, setBatchRangeFrom] = useState("1");
+  const [batchRangeTo, setBatchRangeTo] = useState("");
+  const [batchUniformAmount, setBatchUniformAmount] = useState("1");
+  const [jobNameInput, setJobNameInput] = useState("");
 
   const net = useMemo(() => lithoUiNetwork(), []);
 
@@ -499,6 +515,33 @@ export default function MakaluAirdropSuite({ view = "execution", dashboardSectio
     if (token) h.Authorization = `Bearer ${token}`;
     return h;
   }, [sessionToken]);
+
+  useEffect(() => {
+    if (!sessionVerified || !normalizedJobsEnabled || jobWalletSource !== "generated_batch") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/airdrop/wallet-batches?page=1", { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          batches?: Array<{
+            id: string;
+            name: string;
+            totalWallets: number;
+            insertedWallets: number;
+            status: string;
+          }>;
+        };
+        const list = (data.batches ?? []).filter((b) => b.status === "completed");
+        if (!cancelled) setSavedBatches(list);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionVerified, jobWalletSource, authHeaders, normalizedJobsEnabled]);
 
   const loadDistributorWallets = useCallback(
     async (
@@ -1186,7 +1229,18 @@ export default function MakaluAirdropSuite({ view = "execution", dashboardSectio
       setError("");
       if (!sessionVerified) throw new Error("Verified wallet session required");
       if (!selectedDistributorAddresses.length) throw new Error("Select at least one distributor wallet");
-      if (!recipients.length) throw new Error("Add recipients first");
+      const normalized = normalizedJobsEnabled;
+      if (normalized && jobWalletSource === "generated_batch") {
+        if (!selectedBatchId) throw new Error("Select a saved wallet batch");
+        const toN = parseInt(batchRangeTo.trim(), 10);
+        const fromN = parseInt(batchRangeFrom.trim(), 10) || 1;
+        if (!Number.isFinite(toN) || !Number.isFinite(fromN)) throw new Error("Invalid index range");
+        if (fromN < 1 || toN < fromN) throw new Error("fromWalletIndex must be ≥ 1 and toWalletIndex ≥ from");
+        const u = Number(batchUniformAmount.trim());
+        if (!Number.isFinite(u) || u < 0) throw new Error("Uniform amount must be a non-negative number");
+      } else {
+        if (!recipients.length) throw new Error("Add recipients first");
+      }
       if (mode === "erc20" && !tokenAddress.trim()) throw new Error("Token contract required for ERC-20 mode");
 
       const res = await fetch("/api/airdrop/jobs", {
@@ -1195,7 +1249,13 @@ export default function MakaluAirdropSuite({ view = "execution", dashboardSectio
         body: JSON.stringify({
           mode,
           tokenAddress: tokenAddress.trim() || undefined,
-          recipients,
+          recipients: normalized && jobWalletSource === "generated_batch" ? [] : recipients,
+          walletSource: normalized && jobWalletSource === "generated_batch" ? "generated_batch" : undefined,
+          generatedBatchId: normalized && jobWalletSource === "generated_batch" ? selectedBatchId : undefined,
+          fromWalletIndex: normalized && jobWalletSource === "generated_batch" ? parseInt(batchRangeFrom, 10) || 1 : undefined,
+          toWalletIndex: normalized && jobWalletSource === "generated_batch" ? parseInt(batchRangeTo.trim(), 10) : undefined,
+          uniformAmount: normalized && jobWalletSource === "generated_batch" ? batchUniformAmount.trim() : undefined,
+          jobName: jobNameInput.trim() || undefined,
           loopForever: jobLoopForever,
           network: {
             name: net.name,
@@ -1791,6 +1851,12 @@ export default function MakaluAirdropSuite({ view = "execution", dashboardSectio
                 {label}
               </Link>
             ))}
+            <Link
+              href="/dashboard/wallet-batches"
+              className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-center text-xs font-medium hover:bg-slate-50 dark:border-[#333333] dark:bg-[#111111] dark:hover:bg-[#1a1a1a] md:text-sm"
+            >
+              Wallet batches
+            </Link>
           </nav>
         ) : null}
 
@@ -2761,6 +2827,77 @@ export default function MakaluAirdropSuite({ view = "execution", dashboardSectio
                 </CardTitle>
               </CardHeader>
               <CardContent>
+                {normalizedJobsEnabled ? (
+                  <div className="mb-6 space-y-3 rounded-2xl border border-slate-200 bg-slate-50/80 p-4 dark:border-[#333333] dark:bg-[#141414]/80">
+                    <Label className="text-base">Recipient source</Label>
+                    <div className="flex flex-col gap-2 text-sm sm:flex-row sm:flex-wrap sm:gap-6">
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <input
+                          type="radio"
+                          name="jobWalletSource"
+                          checked={jobWalletSource === "recipients"}
+                          onChange={() => setJobWalletSource("recipients")}
+                        />
+                        <span>Build list here (CSV / generate)</span>
+                      </label>
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <input
+                          type="radio"
+                          name="jobWalletSource"
+                          checked={jobWalletSource === "generated_batch"}
+                          onChange={() => setJobWalletSource("generated_batch")}
+                        />
+                        <span>Saved PostgreSQL wallet batch</span>
+                      </label>
+                    </div>
+                    {jobWalletSource === "generated_batch" ? (
+                      <div className="grid gap-3 border-t border-slate-200 pt-3 dark:border-[#333333] md:grid-cols-2 lg:grid-cols-4">
+                        <div className="space-y-1 md:col-span-2">
+                          <Label>Batch (completed)</Label>
+                          <select
+                            className="flex h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm dark:border-[#333333] dark:bg-[#111111]"
+                            value={selectedBatchId}
+                            onChange={(e) => setSelectedBatchId(e.target.value)}
+                          >
+                            <option value="">— Select batch —</option>
+                            {savedBatches.map((b) => (
+                              <option key={b.id} value={b.id}>
+                                {b.name} ({b.insertedWallets.toLocaleString()} wallets)
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            <Link href="/dashboard/wallet-batches" className="underline">
+                              Open Wallet batches
+                            </Link>{" "}
+                            to generate storage and run <code className="rounded bg-slate-200 px-1 dark:bg-black">npm run wallets:generate</code>.
+                          </p>
+                        </div>
+                        <div className="space-y-1">
+                          <Label>From index (≥ 1)</Label>
+                          <Input inputMode="numeric" value={batchRangeFrom} onChange={(e) => setBatchRangeFrom(e.target.value)} />
+                        </div>
+                        <div className="space-y-1">
+                          <Label>To index (inclusive)</Label>
+                          <Input
+                            inputMode="numeric"
+                            value={batchRangeTo}
+                            onChange={(e) => setBatchRangeTo(e.target.value)}
+                            placeholder="e.g. 100000"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label>Amount per recipient</Label>
+                          <Input value={batchUniformAmount} onChange={(e) => setBatchUniformAmount(e.target.value)} />
+                        </div>
+                        <div className="space-y-1 md:col-span-2">
+                          <Label>Job name (optional)</Label>
+                          <Input value={jobNameInput} onChange={(e) => setJobNameInput(e.target.value)} placeholder="e.g. Litho airdrop wave 1" />
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <Tabs value={mode} onValueChange={(v) => setMode(v as "native" | "erc20")}>
                   <TabsList className="mb-4 grid w-full grid-cols-2 rounded-2xl">
                     <TabsTrigger value="native">Native Token</TabsTrigger>
@@ -2961,7 +3098,12 @@ export default function MakaluAirdropSuite({ view = "execution", dashboardSectio
                 <div className="mt-4 flex flex-wrap gap-2">
                   <Button
                     onClick={() => void generateWalletsOnBackend()}
-                    disabled={busy || !sessionVerified || selectedDistributorAddresses.length === 0}
+                    disabled={
+                      busy ||
+                      !sessionVerified ||
+                      selectedDistributorAddresses.length === 0 ||
+                      (normalizedJobsEnabled && jobWalletSource === "generated_batch")
+                    }
                     className="rounded-2xl"
                   >
                     <Plus className="mr-2 h-4 w-4" />
@@ -2970,7 +3112,14 @@ export default function MakaluAirdropSuite({ view = "execution", dashboardSectio
                   <Button
                     onClick={() => void createBatchJob()}
                     variant="outline"
-                    disabled={busy || !sessionVerified || !recipients.length || selectedDistributorAddresses.length === 0}
+                    disabled={
+                      busy ||
+                      !sessionVerified ||
+                      selectedDistributorAddresses.length === 0 ||
+                      (normalizedJobsEnabled && jobWalletSource === "generated_batch"
+                        ? !selectedBatchId || !batchRangeTo.trim()
+                        : !recipients.length)
+                    }
                     className="rounded-2xl"
                   >
                     <FileText className="mr-2 h-4 w-4" />

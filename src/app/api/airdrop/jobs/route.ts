@@ -7,7 +7,7 @@ import { getJob, saveJob } from "@/lib/job-service";
 import { MAX_JOB_TARGET_RUNS, type RecipientInput, type StoredJob } from "@/lib/job-types";
 import { ownerHasWallet } from "@/lib/distributor-wallet-store";
 import { useNormalizedJobStorage } from "@/lib/normalized-job-config";
-import { createNormalizedJob, startNormalizedJob } from "@/lib/queue/job-queue-repo";
+import { createNormalizedJob, createNormalizedJobFromGeneratedBatch, startNormalizedJob } from "@/lib/queue/job-queue-repo";
 import { requireDistributorSession } from "@/lib/session";
 
 function publicJob(job: StoredJob) {
@@ -38,7 +38,17 @@ export async function POST(request: Request) {
       targetRunCount?: number;
       /** Normalized queue: auto re-queue after each finished cycle until paused/cancelled. */
       loopForever?: boolean;
+      /** `recipients` (default) or `generated_batch` (PostgreSQL saved wallets). */
+      walletSource?: "recipients" | "generated_batch";
+      generatedBatchId?: string;
+      fromWalletIndex?: number;
+      toWalletIndex?: number;
+      /** Required when walletSource is generated_batch — same amount for every row. */
+      uniformAmount?: string | number;
+      jobName?: string;
     };
+
+    const walletSource = body.walletSource === "generated_batch" ? "generated_batch" : "recipients";
 
     const mode = body.mode === "erc20" ? "erc20" : "native";
     const tokenAddress = body.tokenAddress?.trim();
@@ -58,7 +68,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    if (!recipients.length) {
+    if (walletSource !== "generated_batch" && !recipients.length) {
       return NextResponse.json({ error: "No recipients" }, { status: 400 });
     }
     if (distributorAddresses.length === 0 || distributorAddresses.some((a) => !isAddress(a))) {
@@ -75,13 +85,22 @@ export async function POST(request: Request) {
       }
     }
 
-    for (const r of recipients) {
-      if (!r.address || !isAddress(r.address)) {
-        return NextResponse.json({ error: `Invalid recipient address: ${r.address}` }, { status: 400 });
-      }
-      const amt = Number(r.amount);
-      if (!Number.isFinite(amt) || amt < 0) {
-        return NextResponse.json({ error: `Invalid amount for ${r.address}` }, { status: 400 });
+    if (walletSource === "generated_batch" && !useNormalizedJobStorage()) {
+      return NextResponse.json(
+        { error: "Saved wallet batches require normalized PostgreSQL jobs (DATABASE_URL + normalized storage)." },
+        { status: 400 },
+      );
+    }
+
+    if (walletSource === "recipients") {
+      for (const r of recipients) {
+        if (!r.address || !isAddress(r.address)) {
+          return NextResponse.json({ error: `Invalid recipient address: ${r.address}` }, { status: 400 });
+        }
+        const amt = Number(r.amount);
+        if (!Number.isFinite(amt) || amt < 0) {
+          return NextResponse.json({ error: `Invalid amount for ${r.address}` }, { status: 400 });
+        }
       }
     }
 
@@ -94,25 +113,56 @@ export async function POST(request: Request) {
     const jobId = randomUUID();
     const ownerLower = session.address.toLowerCase();
 
+    const jobName = typeof body.jobName === "string" ? body.jobName.trim() : "";
+
     if (useNormalizedJobStorage()) {
-      await createNormalizedJob({
-        jobId,
-        ownerLower,
-        name: null,
-        mode,
-        tokenAddress: mode === "erc20" ? tokenAddress ?? null : null,
-        chainId,
-        signerAddresses: distributorAddresses,
-        recipients,
-        targetRunCount: 1,
-        loopForever,
-      });
+      if (walletSource === "generated_batch") {
+        const batchId = String(body.generatedBatchId ?? "").trim();
+        const fromW = Math.floor(Number(body.fromWalletIndex));
+        const toW = Math.floor(Number(body.toWalletIndex));
+        const uniform = body.uniformAmount != null ? String(body.uniformAmount).trim() : "";
+        const uamt = Number(uniform);
+        if (!batchId) return NextResponse.json({ error: "generatedBatchId is required" }, { status: 400 });
+        if (!uniform || !Number.isFinite(uamt) || uamt < 0) {
+          return NextResponse.json({ error: "uniformAmount must be a non-negative number" }, { status: 400 });
+        }
+        if (!Number.isFinite(fromW) || !Number.isFinite(toW)) {
+          return NextResponse.json({ error: "fromWalletIndex and toWalletIndex must be integers" }, { status: 400 });
+        }
+        await createNormalizedJobFromGeneratedBatch({
+          jobId,
+          ownerLower,
+          name: jobName || null,
+          mode,
+          tokenAddress: mode === "erc20" ? tokenAddress ?? null : null,
+          chainId,
+          signerAddresses: distributorAddresses,
+          amount: uniform,
+          generatedBatchId: batchId,
+          fromWalletIndex: fromW,
+          toWalletIndex: toW,
+          loopForever,
+        });
+      } else {
+        await createNormalizedJob({
+          jobId,
+          ownerLower,
+          name: jobName || null,
+          mode,
+          tokenAddress: mode === "erc20" ? tokenAddress ?? null : null,
+          chainId,
+          signerAddresses: distributorAddresses,
+          recipients,
+          targetRunCount: 1,
+          loopForever,
+        });
+      }
       const started = await startNormalizedJob(jobId, ownerLower);
       if (!started) {
         return NextResponse.json(
           {
             error:
-              "Job rows were created but the job could not be queued (draft → queued). Inspect MySQL `jobs` / `job_wallets` and retry Start or queue-admin recover.",
+              "Job rows were created but the job could not be queued (draft → queued). Inspect PostgreSQL `jobs` / `job_wallets` and retry Start or queue-admin recover.",
           },
           { status: 500 },
         );
