@@ -16,6 +16,7 @@ Large recipient lists (100k+) are stored in **`generated_wallet_batches`** and *
 | `AUTH_SECRET` | Required for the app (sessions, JWTs, etc.). |
 | `WALLET_GENERATION_BATCH_SIZE` | Rows per insert in the generator worker (default **5000**, clamp 100–5000). |
 | `WALLET_GENERATION_MAX_WALLETS` | Cap on `totalWallets` when creating a batch via API (default 1_000_000). |
+| `AIRDROP_DB_CONNECTION_LIMIT` | Per-process pool size for the web app and workers (default **8**). `npm run wallets:generate` uses **4** when unset after `.env` load. Keep **Σ(limit × processes) < Postgres max_connections**. |
 
 `AIRDROP_WALLET_STORAGE_SECRET` in `.env.example` is optional (reserved for `wallet-field-crypto` helpers); **wallet batches do not store recipient private keys.**
 

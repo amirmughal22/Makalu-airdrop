@@ -50,7 +50,7 @@ function poolConfigFromDatabaseUrl(): PoolConfig | null {
   }
   return {
     connectionString: url,
-    max: envInt("AIRDROP_DB_CONNECTION_LIMIT", 16, 1, 100),
+    max: envInt("AIRDROP_DB_CONNECTION_LIMIT", 8, 1, 100),
     idleTimeoutMillis: envInt("AIRDROP_DB_IDLE_TIMEOUT_MS", 30_000, 1000, 600_000),
     connectionTimeoutMillis: envInt("AIRDROP_DB_CONNECT_TIMEOUT_MS", 10_000, 1000, 120_000),
   };

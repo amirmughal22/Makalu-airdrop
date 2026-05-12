@@ -7,7 +7,7 @@
  * Uses a PostgreSQL advisory lock per batch so two wallet workers never insert into the same batch concurrently.
  * Dashboard/API: `POST /api/airdrop/wallet-batches/{id}/resume` requeues `running` → `pending` if you prefer that path.
  *
- * Env: DATABASE_URL, WALLET_GENERATION_BATCH_SIZE (optional). No wallet encryption secrets required for address-only batches.
+ * Env: DATABASE_URL, WALLET_GENERATION_BATCH_SIZE (optional). If `AIRDROP_DB_CONNECTION_LIMIT` is unset, this script sets it to **4** after loading `.env` to reduce `max_connections` pressure.
  */
 import { Wallet } from "ethers";
 import { bootstrapProductionEnv, assertDatabaseConfigured } from "../src/lib/queue/production-env";
@@ -33,6 +33,10 @@ const PROJECT_ROOT = process.cwd();
 void (async () => {
   try {
     bootstrapProductionEnv(PROJECT_ROOT);
+    // One process should not open a large pool; wallet-gen holds one client for most work (see markBatch* on same client).
+    if (!process.env.AIRDROP_DB_CONNECTION_LIMIT?.trim()) {
+      process.env.AIRDROP_DB_CONNECTION_LIMIT = "4";
+    }
     assertDatabaseConfigured(PROJECT_ROOT);
   } catch (e) {
     console.error("[wallets:generate] bootstrap failed:", e instanceof Error ? e.message : e);
@@ -47,8 +51,16 @@ void (async () => {
     try {
       batch = await claimNextPendingBatch();
     } catch (e) {
-      console.error("[wallets:generate] claim failed", e);
-      await sleep(3000);
+      const code = e && typeof e === "object" && "code" in e ? String((e as { code: string }).code) : "";
+      if (code === "53300") {
+        console.error(
+          "[wallets:generate] Postgres refused new connections (max_connections). Reduce AIRDROP_DB_CONNECTION_LIMIT on web/worker services or increase Postgres max_connections.",
+        );
+        await sleep(10_000);
+      } else {
+        console.error("[wallets:generate] claim failed", e);
+        await sleep(3000);
+      }
       continue;
     }
     if (!batch) {
@@ -114,12 +126,12 @@ void (async () => {
           }
         }
 
-        await markBatchCompleted(batchId);
+        await markBatchCompleted(batchId, client);
         console.info(`[wallets:generate] batch ${batchId} completed`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error(`[wallets:generate] batch ${batchId} failed`, e);
-        await markBatchFailed(batchId, msg);
+        await markBatchFailed(batchId, msg, client);
       } finally {
         await client
           .query(`SELECT pg_advisory_unlock($1::integer, hashtext($2::text))`, [WALLET_GEN_ADVISORY_CLASS, batchId])

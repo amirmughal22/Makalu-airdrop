@@ -135,10 +135,13 @@ export async function bumpBatchInserted(batchId: string, delta: number): Promise
   );
 }
 
-export async function markBatchCompleted(batchId: string): Promise<void> {
-  const pool = await getPostgresPool();
+export async function markBatchCompleted(
+  batchId: string,
+  executor?: Pick<Pool | PoolClient, "query">,
+): Promise<void> {
+  const ex = executor ?? (await getPostgresPool());
   await pgExecute(
-    pool,
+    ex,
     `UPDATE generated_wallet_batches
      SET status = 'completed', completed_at = NOW(), updated_at = NOW()
      WHERE id = ?::uuid`,
@@ -146,10 +149,14 @@ export async function markBatchCompleted(batchId: string): Promise<void> {
   );
 }
 
-export async function markBatchFailed(batchId: string, err: string): Promise<void> {
-  const pool = await getPostgresPool();
+export async function markBatchFailed(
+  batchId: string,
+  err: string,
+  executor?: Pick<Pool | PoolClient, "query">,
+): Promise<void> {
+  const ex = executor ?? (await getPostgresPool());
   await pgExecute(
-    pool,
+    ex,
     `UPDATE generated_wallet_batches
      SET status = 'failed', error = ?, updated_at = NOW(), completed_at = NOW()
      WHERE id = ?::uuid`,

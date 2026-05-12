@@ -22,7 +22,7 @@ Set these on the **queue worker** service (and align the **web** app where noted
 | `AIRDROP_QUEUE_BATCH_SIZE` | `48` | Wallets claimed per claim transaction (code max 500). |
 | `AIRDROP_QUEUE_WORKER_POLL_MS` | `500` | Delay when a poll finds nothing to claim. |
 | `AIRDROP_MAX_PARALLEL_TXS` | `6` | Fallback when DB `queue_runtime_settings` is missing; prefer DB + SQL below. |
-| `AIRDROP_DB_CONNECTION_LIMIT` | `16` | **Per Node process** — see pool warning below. |
+| `AIRDROP_DB_CONNECTION_LIMIT` | `8` | **Per Node process** — see pool warning below. |
 | `AIRDROP_EMBEDDED_QUEUE_WORKER` | `false` | Set on the **web** app when dedicated `worker:queue` replicas handle claims (recommended). |
 
 Also set `AIRDROP_QUEUE_V2=true`, `DATABASE_URL`, and a **unique** `AIRDROP_WORKER_ID` per worker replica (see warnings).
