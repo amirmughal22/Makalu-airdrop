@@ -363,6 +363,11 @@ export default function MakaluAirdropSuite({
   const [batchUniformAmount, setBatchUniformAmount] = useState("1");
   const [jobNameInput, setJobNameInput] = useState("");
 
+  useEffect(() => {
+    if (!normalizedJobsEnabled) return;
+    if (jobWalletSource === "generated_batch") setSplitMode("randomRange");
+  }, [jobWalletSource, normalizedJobsEnabled]);
+
   const net = useMemo(() => lithoUiNetwork(), []);
 
   const dashWalletListTotalPages = Math.max(1, Math.ceil(distributorWallets.length / DISTRIBUTOR_WALLETS_PAGE_SIZE));
@@ -1237,8 +1242,16 @@ export default function MakaluAirdropSuite({
         const fromN = parseInt(batchRangeFrom.trim(), 10) || 1;
         if (!Number.isFinite(toN) || !Number.isFinite(fromN)) throw new Error("Invalid index range");
         if (fromN < 1 || toN < fromN) throw new Error("fromWalletIndex must be ≥ 1 and toWalletIndex ≥ from");
-        const u = Number(batchUniformAmount.trim());
-        if (!Number.isFinite(u) || u < 0) throw new Error("Uniform amount must be a non-negative number");
+        if (splitMode === "equalTotal") {
+          const u = Number(batchUniformAmount.trim());
+          if (!Number.isFinite(u) || u < 0) throw new Error("Uniform amount must be a non-negative number");
+        } else {
+          const lo = Number(minPerWallet.trim());
+          const hi = Number(maxPerWallet.trim());
+          if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo < 0 || hi < lo) {
+            throw new Error("Invalid min and max per wallet for random-range batch job");
+          }
+        }
       } else {
         if (!recipients.length) throw new Error("Add recipients first");
       }
@@ -1255,7 +1268,19 @@ export default function MakaluAirdropSuite({
           generatedBatchId: normalized && jobWalletSource === "generated_batch" ? selectedBatchId : undefined,
           fromWalletIndex: normalized && jobWalletSource === "generated_batch" ? parseInt(batchRangeFrom, 10) || 1 : undefined,
           toWalletIndex: normalized && jobWalletSource === "generated_batch" ? parseInt(batchRangeTo.trim(), 10) : undefined,
-          uniformAmount: normalized && jobWalletSource === "generated_batch" ? batchUniformAmount.trim() : undefined,
+          uniformAmount:
+            normalized && jobWalletSource === "generated_batch" && splitMode === "equalTotal"
+              ? batchUniformAmount.trim()
+              : undefined,
+          splitMode: normalized && jobWalletSource === "generated_batch" ? splitMode : undefined,
+          minAmount:
+            normalized && jobWalletSource === "generated_batch" && splitMode === "randomRange"
+              ? minPerWallet.trim()
+              : undefined,
+          maxAmount:
+            normalized && jobWalletSource === "generated_batch" && splitMode === "randomRange"
+              ? maxPerWallet.trim()
+              : undefined,
           jobName: jobNameInput.trim() || undefined,
           loopForever: jobLoopForever,
           network: {
@@ -2828,77 +2853,6 @@ export default function MakaluAirdropSuite({
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {normalizedJobsEnabled ? (
-                  <div className="mb-6 space-y-3 rounded-2xl border border-slate-200 bg-slate-50/80 p-4 dark:border-[#333333] dark:bg-[#141414]/80">
-                    <Label className="text-base">Recipient source</Label>
-                    <div className="flex flex-col gap-2 text-sm sm:flex-row sm:flex-wrap sm:gap-6">
-                      <label className="flex cursor-pointer items-center gap-2">
-                        <input
-                          type="radio"
-                          name="jobWalletSource"
-                          checked={jobWalletSource === "recipients"}
-                          onChange={() => setJobWalletSource("recipients")}
-                        />
-                        <span>Build list here (CSV / generate)</span>
-                      </label>
-                      <label className="flex cursor-pointer items-center gap-2">
-                        <input
-                          type="radio"
-                          name="jobWalletSource"
-                          checked={jobWalletSource === "generated_batch"}
-                          onChange={() => setJobWalletSource("generated_batch")}
-                        />
-                        <span>Saved PostgreSQL wallet batch</span>
-                      </label>
-                    </div>
-                    {jobWalletSource === "generated_batch" ? (
-                      <div className="grid gap-3 border-t border-slate-200 pt-3 dark:border-[#333333] md:grid-cols-2 lg:grid-cols-4">
-                        <div className="space-y-1 md:col-span-2">
-                          <Label>Batch (completed)</Label>
-                          <select
-                            className="flex h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm dark:border-[#333333] dark:bg-[#111111]"
-                            value={selectedBatchId}
-                            onChange={(e) => setSelectedBatchId(e.target.value)}
-                          >
-                            <option value="">— Select batch —</option>
-                            {savedBatches.map((b) => (
-                              <option key={b.id} value={b.id}>
-                                {b.name} ({b.insertedWallets.toLocaleString()} wallets)
-                              </option>
-                            ))}
-                          </select>
-                          <p className="text-xs text-slate-500 dark:text-slate-400">
-                            <Link href="/dashboard/wallet-batches" className="underline">
-                              Open Wallet batches
-                            </Link>{" "}
-                            to generate storage and run <code className="rounded bg-slate-200 px-1 dark:bg-black">npm run wallets:generate</code>.
-                          </p>
-                        </div>
-                        <div className="space-y-1">
-                          <Label>From index (≥ 1)</Label>
-                          <Input inputMode="numeric" value={batchRangeFrom} onChange={(e) => setBatchRangeFrom(e.target.value)} />
-                        </div>
-                        <div className="space-y-1">
-                          <Label>To index (inclusive)</Label>
-                          <Input
-                            inputMode="numeric"
-                            value={batchRangeTo}
-                            onChange={(e) => setBatchRangeTo(e.target.value)}
-                            placeholder="e.g. 100000"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <Label>Amount per recipient</Label>
-                          <Input value={batchUniformAmount} onChange={(e) => setBatchUniformAmount(e.target.value)} />
-                        </div>
-                        <div className="space-y-1 md:col-span-2">
-                          <Label>Job name (optional)</Label>
-                          <Input value={jobNameInput} onChange={(e) => setJobNameInput(e.target.value)} placeholder="e.g. Litho airdrop wave 1" />
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
                 <Tabs value={mode} onValueChange={(v) => setMode(v as "native" | "erc20")}>
                   <TabsList className="mb-4 grid w-full grid-cols-2 rounded-2xl">
                     <TabsTrigger value="native">Native Token</TabsTrigger>
@@ -2914,10 +2868,12 @@ export default function MakaluAirdropSuite({
 
                       <TabsContent value="equalTotal" className="space-y-4">
                         <div className="grid gap-4 md:grid-cols-3">
-                          <div className="space-y-2">
-                            <Label>Wallet count</Label>
-                            <Input value={walletCount} onChange={(e) => setWalletCount(e.target.value)} />
-                          </div>
+                          {!normalizedJobsEnabled || jobWalletSource === "recipients" ? (
+                            <div className="space-y-2">
+                              <Label>Wallet count</Label>
+                              <Input value={walletCount} onChange={(e) => setWalletCount(e.target.value)} />
+                            </div>
+                          ) : null}
                           <div className="space-y-2">
                             <Label>Total native amount</Label>
                             <Input value={totalAmount} onChange={(e) => setTotalAmount(e.target.value)} />
@@ -2938,10 +2894,12 @@ export default function MakaluAirdropSuite({
 
                       <TabsContent value="randomRange" className="space-y-4">
                         <div className="grid gap-4 md:grid-cols-3">
-                          <div className="space-y-2">
-                            <Label>Wallet count</Label>
-                            <Input value={walletCount} onChange={(e) => setWalletCount(e.target.value)} />
-                          </div>
+                          {!normalizedJobsEnabled || jobWalletSource === "recipients" ? (
+                            <div className="space-y-2">
+                              <Label>Wallet count</Label>
+                              <Input value={walletCount} onChange={(e) => setWalletCount(e.target.value)} />
+                            </div>
+                          ) : null}
                           <div className="space-y-2">
                             <Label>Min per wallet (native)</Label>
                             <Input value={minPerWallet} onChange={(e) => setMinPerWallet(e.target.value)} placeholder="e.g. 1.25" />
@@ -2987,10 +2945,12 @@ export default function MakaluAirdropSuite({
 
                       <TabsContent value="equalTotal" className="space-y-4">
                         <div className="grid gap-4 md:grid-cols-3">
-                          <div className="space-y-2">
-                            <Label>Wallet count</Label>
-                            <Input value={walletCount} onChange={(e) => setWalletCount(e.target.value)} />
-                          </div>
+                          {!normalizedJobsEnabled || jobWalletSource === "recipients" ? (
+                            <div className="space-y-2">
+                              <Label>Wallet count</Label>
+                              <Input value={walletCount} onChange={(e) => setWalletCount(e.target.value)} />
+                            </div>
+                          ) : null}
                           <div className="space-y-2 md:col-span-2">
                             <Label>Total token amount</Label>
                             <Input value={totalAmount} onChange={(e) => setTotalAmount(e.target.value)} />
@@ -3011,10 +2971,12 @@ export default function MakaluAirdropSuite({
 
                       <TabsContent value="randomRange" className="space-y-4">
                         <div className="grid gap-4 md:grid-cols-3">
-                          <div className="space-y-2">
-                            <Label>Wallet count</Label>
-                            <Input value={walletCount} onChange={(e) => setWalletCount(e.target.value)} />
-                          </div>
+                          {!normalizedJobsEnabled || jobWalletSource === "recipients" ? (
+                            <div className="space-y-2">
+                              <Label>Wallet count</Label>
+                              <Input value={walletCount} onChange={(e) => setWalletCount(e.target.value)} />
+                            </div>
+                          ) : null}
                           <div className="space-y-2">
                             <Label>Min per wallet (tokens)</Label>
                             <Input value={minPerWallet} onChange={(e) => setMinPerWallet(e.target.value)} />
@@ -3044,6 +3006,82 @@ export default function MakaluAirdropSuite({
                     </Tabs>
                   </TabsContent>
                 </Tabs>
+
+                {normalizedJobsEnabled ? (
+                  <div className="mt-6 space-y-3 rounded-2xl border border-slate-200 bg-slate-50/80 p-4 dark:border-[#333333] dark:bg-[#141414]/80">
+                    <Label className="text-base">Recipient source</Label>
+                    <div className="flex flex-col gap-2 text-sm sm:flex-row sm:flex-wrap sm:gap-6">
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <input
+                          type="radio"
+                          name="jobWalletSource"
+                          checked={jobWalletSource === "recipients"}
+                          onChange={() => setJobWalletSource("recipients")}
+                        />
+                        <span>Build list here (CSV / generate)</span>
+                      </label>
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <input
+                          type="radio"
+                          name="jobWalletSource"
+                          checked={jobWalletSource === "generated_batch"}
+                          onChange={() => setJobWalletSource("generated_batch")}
+                        />
+                        <span>Saved wallets</span>
+                      </label>
+                    </div>
+                    {jobWalletSource === "generated_batch" ? (
+                      <div className="grid gap-3 border-t border-slate-200 pt-3 dark:border-[#333333] md:grid-cols-2 lg:grid-cols-4">
+                        <div className="space-y-1 md:col-span-2">
+                          <Label>Batch (completed)</Label>
+                          <select
+                            className="flex h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm dark:border-[#333333] dark:bg-[#111111]"
+                            value={selectedBatchId}
+                            onChange={(e) => setSelectedBatchId(e.target.value)}
+                          >
+                            <option value="">— Select batch —</option>
+                            {savedBatches.map((b) => (
+                              <option key={b.id} value={b.id}>
+                                {b.name} ({b.insertedWallets.toLocaleString()} wallets)
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            <Link href="/dashboard/wallet-batches" className="underline">
+                              Open Wallet batches
+                            </Link>{" "}
+                            to generate storage and run <code className="rounded bg-slate-200 px-1 dark:bg-black">npm run wallets:generate</code>.
+                            Saved batch jobs use <strong>min / max per wallet</strong> from the tabs above when <em>Random per wallet</em> is selected; use{" "}
+                            <em>Fixed total</em> for the same amount to every address in the index range.
+                          </p>
+                        </div>
+                        <div className="space-y-1">
+                          <Label>From index (≥ 1)</Label>
+                          <Input inputMode="numeric" value={batchRangeFrom} onChange={(e) => setBatchRangeFrom(e.target.value)} />
+                        </div>
+                        <div className="space-y-1">
+                          <Label>To index (inclusive)</Label>
+                          <Input
+                            inputMode="numeric"
+                            value={batchRangeTo}
+                            onChange={(e) => setBatchRangeTo(e.target.value)}
+                            placeholder="e.g. 100000"
+                          />
+                        </div>
+                        {splitMode === "equalTotal" ? (
+                          <div className="space-y-1">
+                            <Label>Amount per recipient</Label>
+                            <Input value={batchUniformAmount} onChange={(e) => setBatchUniformAmount(e.target.value)} />
+                          </div>
+                        ) : null}
+                        <div className="space-y-1 md:col-span-2">
+                          <Label>Job name (optional)</Label>
+                          <Input value={jobNameInput} onChange={(e) => setJobNameInput(e.target.value)} placeholder="e.g. Litho airdrop wave 1" />
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50/80 p-4 text-sm dark:border-[#222222] dark:bg-[#111111]/80">
                   <input

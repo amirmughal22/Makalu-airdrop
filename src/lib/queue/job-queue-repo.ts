@@ -22,6 +22,7 @@ import {
   sessionIsolation,
 } from "./runtime-queue-diag";
 import { getBatchForOwner } from "../generated-wallet-repo";
+import { randomAmountsInRangeNative, randomAmountsInRangeToken } from "../split-amounts";
 import { getQueueRuntimeFlagsSync, refreshQueueRuntimeCache } from "./queue-runtime-settings";
 import type { ClaimedWalletRow, NormalizedJobRow } from "./types";
 
@@ -217,13 +218,32 @@ export type CreateNormalizedJobFromBatchInput = {
   tokenAddress?: string | null;
   chainId: number;
   signerAddresses: string[];
-  /** Same decimal string for every recipient row. */
-  amount: string;
   generatedBatchId: string;
   /** Inclusive 1-based indices (first generated wallet = 1). */
   fromWalletIndex: number;
   toWalletIndex: number;
   loopForever?: boolean;
+  /** Same decimal string for every recipient row. */
+  amountMode: "uniform";
+  uniformAmount: string;
+} | {
+  jobId: string;
+  ownerLower: string;
+  name?: string | null;
+  mode: "native" | "erc20";
+  tokenAddress?: string | null;
+  chainId: number;
+  signerAddresses: string[];
+  generatedBatchId: string;
+  fromWalletIndex: number;
+  toWalletIndex: number;
+  loopForever?: boolean;
+  /** Independent random amount per row in [minAmount, maxAmount]. */
+  amountMode: "randomRange";
+  minAmount: string;
+  maxAmount: string;
+  /** ERC-20 token decimals (native mode ignores). */
+  tokenDecimals: number;
 };
 
 const JOB_WALLET_FROM_GENERATED_CHUNK = 2500;
@@ -258,8 +278,17 @@ export async function createNormalizedJobFromGeneratedBatch(input: CreateNormali
     throw new Error(`Range not fully populated in database (expected ${expected} rows, found ${cnt})`);
   }
 
-  const amt = Number(input.amount);
-  if (!Number.isFinite(amt) || amt < 0) throw new Error("Invalid uniform amount");
+  const uniformMode = input.amountMode === "uniform";
+  if (uniformMode) {
+    const amt = Number(input.uniformAmount);
+    if (!Number.isFinite(amt) || amt < 0) throw new Error("Invalid uniform amount");
+  } else {
+    const lo = Number(input.minAmount);
+    const hi = Number(input.maxAmount);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo < 0 || hi < lo) {
+      throw new Error("Invalid min/max amounts for random range");
+    }
+  }
 
   const distributors = [...new Set(input.signerAddresses.map((a) => a.toLowerCase()))];
   if (!distributors.length) throw new Error("No distributor wallets");
@@ -289,7 +318,9 @@ export async function createNormalizedJobFromGeneratedBatch(input: CreateNormali
       ],
     );
 
-    if (distributors.length === 1) {
+    const uniformStr = uniformMode ? input.uniformAmount : "";
+
+    if (uniformMode && distributors.length === 1) {
       await pgExecute(
         conn,
         `INSERT INTO job_wallets (job_id, wallet_address, amount, status, signer_address)
@@ -297,7 +328,7 @@ export async function createNormalizedJobFromGeneratedBatch(input: CreateNormali
          FROM generated_wallets gw
          WHERE gw.batch_id = ?::uuid AND gw.wallet_index BETWEEN ? AND ?
          ORDER BY gw.wallet_index`,
-        [input.jobId, String(input.amount), distributors[0]!, input.generatedBatchId, fromIdx, toIdx],
+        [input.jobId, uniformStr, distributors[0]!, input.generatedBatchId, fromIdx, toIdx],
       );
     } else {
       let cur = fromIdx;
@@ -313,11 +344,21 @@ export async function createNormalizedJobFromGeneratedBatch(input: CreateNormali
            ORDER BY wallet_index ASC`,
           [input.generatedBatchId, cur, hi],
         );
+        const n = slice.length;
+        let amounts: string[] = [];
+        if (uniformMode) {
+          amounts = Array.from({ length: n }, () => uniformStr);
+        } else if (input.mode === "native") {
+          amounts = randomAmountsInRangeNative(input.minAmount, input.maxAmount, n);
+        } else {
+          amounts = randomAmountsInRangeToken(input.minAmount, input.maxAmount, n, input.tokenDecimals);
+        }
         const placeholders = slice.map(() => "(?, ?, ?, 'pending', ?)").join(", ");
         const flat: unknown[] = [];
-        for (const row of slice) {
+        for (let i = 0; i < slice.length; i++) {
+          const row = slice[i]!;
           const signer = distributors[(row.wallet_index - fromIdx) % distributors.length]!;
-          flat.push(input.jobId, row.address.toLowerCase(), String(input.amount), signer);
+          flat.push(input.jobId, row.address.toLowerCase(), amounts[i]!, signer);
         }
         if (flat.length) {
           await pgExecute(

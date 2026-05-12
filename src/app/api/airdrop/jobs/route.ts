@@ -7,6 +7,7 @@ import { getJob, saveJob } from "@/lib/job-service";
 import { MAX_JOB_TARGET_RUNS, type RecipientInput, type StoredJob } from "@/lib/job-types";
 import { ownerHasWallet } from "@/lib/distributor-wallet-store";
 import { useNormalizedJobStorage } from "@/lib/normalized-job-config";
+import { readErc20Decimals } from "@/lib/evm-send-transfer";
 import { createNormalizedJob, createNormalizedJobFromGeneratedBatch, startNormalizedJob } from "@/lib/queue/job-queue-repo";
 import { requireDistributorSession } from "@/lib/session";
 
@@ -43,8 +44,12 @@ export async function POST(request: Request) {
       generatedBatchId?: string;
       fromWalletIndex?: number;
       toWalletIndex?: number;
-      /** Required when walletSource is generated_batch — same amount for every row. */
+      /** Required when walletSource is generated_batch and splitMode is equalTotal. */
       uniformAmount?: string | number;
+      /** For generated_batch: equalTotal (uniform) vs randomRange (min/max per row). */
+      splitMode?: "equalTotal" | "randomRange";
+      minAmount?: string;
+      maxAmount?: string;
       jobName?: string;
     };
 
@@ -120,29 +125,68 @@ export async function POST(request: Request) {
         const batchId = String(body.generatedBatchId ?? "").trim();
         const fromW = Math.floor(Number(body.fromWalletIndex));
         const toW = Math.floor(Number(body.toWalletIndex));
-        const uniform = body.uniformAmount != null ? String(body.uniformAmount).trim() : "";
-        const uamt = Number(uniform);
+        const batchSplit = body.splitMode === "equalTotal" ? "equalTotal" : "randomRange";
         if (!batchId) return NextResponse.json({ error: "generatedBatchId is required" }, { status: 400 });
-        if (!uniform || !Number.isFinite(uamt) || uamt < 0) {
-          return NextResponse.json({ error: "uniformAmount must be a non-negative number" }, { status: 400 });
-        }
         if (!Number.isFinite(fromW) || !Number.isFinite(toW)) {
           return NextResponse.json({ error: "fromWalletIndex and toWalletIndex must be integers" }, { status: 400 });
         }
-        await createNormalizedJobFromGeneratedBatch({
-          jobId,
-          ownerLower,
-          name: jobName || null,
-          mode,
-          tokenAddress: mode === "erc20" ? tokenAddress ?? null : null,
-          chainId,
-          signerAddresses: distributorAddresses,
-          amount: uniform,
-          generatedBatchId: batchId,
-          fromWalletIndex: fromW,
-          toWalletIndex: toW,
-          loopForever,
-        });
+        if (batchSplit === "equalTotal") {
+          const uniform = body.uniformAmount != null ? String(body.uniformAmount).trim() : "";
+          const uamt = Number(uniform);
+          if (!uniform || !Number.isFinite(uamt) || uamt < 0) {
+            return NextResponse.json({ error: "uniformAmount must be a non-negative number" }, { status: 400 });
+          }
+          await createNormalizedJobFromGeneratedBatch({
+            jobId,
+            ownerLower,
+            name: jobName || null,
+            mode,
+            tokenAddress: mode === "erc20" ? tokenAddress ?? null : null,
+            chainId,
+            signerAddresses: distributorAddresses,
+            generatedBatchId: batchId,
+            fromWalletIndex: fromW,
+            toWalletIndex: toW,
+            loopForever,
+            amountMode: "uniform",
+            uniformAmount: uniform,
+          });
+        } else {
+          const minA = String(body.minAmount ?? "").trim();
+          const maxA = String(body.maxAmount ?? "").trim();
+          if (!minA || !maxA) {
+            return NextResponse.json(
+              { error: "minAmount and maxAmount are required for random-range saved batch jobs" },
+              { status: 400 },
+            );
+          }
+          const lo = Number(minA);
+          const hi = Number(maxA);
+          if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo < 0 || hi < lo) {
+            return NextResponse.json({ error: "Invalid min and max amounts" }, { status: 400 });
+          }
+          let tokenDecimals = 18;
+          if (mode === "erc20" && tokenAddress) {
+            tokenDecimals = await readErc20Decimals(tokenAddress as `0x${string}`, chainId);
+          }
+          await createNormalizedJobFromGeneratedBatch({
+            jobId,
+            ownerLower,
+            name: jobName || null,
+            mode,
+            tokenAddress: mode === "erc20" ? tokenAddress ?? null : null,
+            chainId,
+            signerAddresses: distributorAddresses,
+            generatedBatchId: batchId,
+            fromWalletIndex: fromW,
+            toWalletIndex: toW,
+            loopForever,
+            amountMode: "randomRange",
+            minAmount: minA,
+            maxAmount: maxA,
+            tokenDecimals,
+          });
+        }
       } else {
         await createNormalizedJob({
           jobId,

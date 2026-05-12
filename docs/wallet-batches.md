@@ -7,7 +7,7 @@ Large recipient lists (100k+) are stored in **`generated_wallet_batches`** and *
 1. **Dashboard → Wallet batches** — create a batch (name + count). Status starts as `pending`.
 2. Run **`npm run wallets:generate`** on the server (Coolify worker or PM2). The worker claims batches that are **`pending`** or **`running` with partial progress** (resume after crash, deploy, or Ctrl+C) using **`FOR UPDATE SKIP LOCKED`**, then takes a **per-batch PostgreSQL advisory lock** so two wallet processes never insert into the same batch concurrently. It inserts **recipient addresses only** (no private keys), updates progress, then sets status **`completed`** (or **`failed`**). Airdrops send from your **distributor** keys to those addresses.
 3. **Stuck `running`?** Restart `npm run wallets:generate` — it will pick up incomplete batches. Optionally **`POST /api/airdrop/wallet-batches/{id}/resume`** (or the Dashboard **Resume** button) sets an interrupted batch to **`pending`** again for the same effect.
-4. **Airdrop configuration** — choose *Saved PostgreSQL wallet batch*, pick the batch, **from** / **to** indices (1-based inclusive), uniform amount per recipient, distributor signers, then **Create Batch Job**.
+4. **Airdrop configuration** — choose *Saved wallets*, pick the batch, **from** / **to** indices (1-based inclusive), amount rules per tab, distributor signers, then **Create Batch Job**.
 
 ## Environment
 
@@ -31,7 +31,9 @@ See `migrations/005_generated_wallet_batches.sql`, `migrations/006_generated_wal
 - `walletSource`: `"generated_batch"`
 - `generatedBatchId`: UUID string
 - `fromWalletIndex`, `toWalletIndex`: integers, 1-based inclusive
-- `uniformAmount`: same amount string for every `job_wallets` row
+- `splitMode`: `"equalTotal"` (same amount every row) or `"randomRange"` (independent random in `[minAmount, maxAmount]` per row)
+- `uniformAmount`: required when `splitMode` is `"equalTotal"`
+- `minAmount`, `maxAmount`: required when `splitMode` is `"randomRange"` (same semantics as the Airdrop UI min/max fields)
 - `jobName` (optional)
 
 Existing **recipient list** mode is unchanged when `walletSource` is omitted or `"recipients"`.

@@ -349,7 +349,7 @@ export default function WalletBatchesDashboard() {
           After creating a batch, run <code className="rounded bg-white/70 px-1 font-mono dark:bg-black/40">npm run wallets:generate</code> on
           the server until status becomes <strong>completed</strong>. If the process stops mid-batch, status may stay <strong>running</strong> —
           restarting the command resumes automatically; you can also use <strong>Resume</strong> to set the batch back to <strong>pending</strong>.
-          Then create an airdrop job from Dashboard → Airdrop and choose &quot;Saved PostgreSQL wallet batch&quot;.
+          Then create an airdrop job from Dashboard → Airdrop and choose &quot;Saved wallets&quot;.
         </AlertDescription>
       </Alert>
     </div>
