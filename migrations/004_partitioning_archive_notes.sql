@@ -1,0 +1,15 @@
+-- Reference only — not executed by the app. Optional strategies when job_wallets exceeds tens of millions of rows.
+--
+-- 1) HASH/RANGE partitioning (MySQL 8+)
+--    ALTER TABLE job_wallets PARTITION BY HASH(job_id) PARTITIONS 32;
+--    or RANGE COLUMNS(created_at) with monthly boundaries for time-scoped reporting.
+--
+-- 2) Archive completed work
+--    CREATE TABLE jobs_archive LIKE jobs;
+--    CREATE TABLE job_wallets_archive LIKE job_wallets;
+--    Periodically: INSERT INTO jobs_archive SELECT * FROM jobs WHERE status='completed' AND updated_at < ...
+--                 INSERT INTO job_wallets_archive SELECT jw.* FROM job_wallets jw INNER JOIN jobs j ON ...
+--    Then DELETE with matching predicates (under maintenance window + FK handling).
+--
+-- 3) Cold export
+--    mysqldump --where="job_id='…'" or OUTFILE to object storage; keep hot tables bounded.

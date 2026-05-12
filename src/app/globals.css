@@ -1,0 +1,16 @@
+@import "tailwindcss";
+@config "../../tailwind.config.js";
+
+/* Slightly larger than browser default (16px) so text-sm / text-base / etc. scale up together */
+html {
+  font-size: 106.25%;
+}
+
+body {
+  @apply antialiased;
+}
+
+/*
+ * #000000 / #111111 are applied only via Tailwind `dark:` on layout + components.
+ * Light mode (theme switcher removes `dark` from <html>) keeps slate-50 / white surfaces.
+ */
