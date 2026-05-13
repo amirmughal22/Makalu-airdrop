@@ -2,6 +2,9 @@
  * Operational CLI for the normalized queue (PostgreSQL).
  *
  * Usage (from repo root):
+ *   npm run queue:diagnose                    — full stuck-queue snapshot (see scripts/diagnose-stuck-queue.mjs)
+ *   npm run queue:repair-stuck               — dry-run repair (stale processing + job status)
+ *   npm run queue:repair-stuck -- --apply    — apply repair
  *   npm run queue:admin -- stale
  *   npm run queue:admin -- reconcile-job <jobId>
  *   npm run queue:admin -- diagnose-queue

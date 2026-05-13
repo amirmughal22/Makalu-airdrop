@@ -11,7 +11,7 @@ import {
   queueGlobalPaused,
   queueMaxAttempts,
   queueRetryBackoffMsForRetryCount,
-  queueStaleProcessingMs,
+  queueStaleProcessingThresholdMs,
 } from "./config";
 import { markWalletCompleted } from "./queue-worker-liveness";
 import { recordClaimAttempt } from "./claim-attempt-stats";
@@ -31,6 +31,10 @@ import {
   CLAIM_ES_JW_J,
   CLAIM_ES_PX_JP,
 } from "./claim-select-sql";
+
+/** Throttle structured logs when claim returns 0 while SQL still sees claimable pending rows. */
+let lastClaimStarvationLogMs = 0;
+const CLAIM_STARVATION_LOG_COOLDOWN_MS = 60_000;
 
 /** Drive job.status from wallet states — no COUNT(*) on job_wallets (hot path). */
 const REFRESH_JOB_STATUS_SQL = `UPDATE jobs j
@@ -601,6 +605,10 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
       const iso = await sessionIsolation(conn);
       console.info(`[claim-diag] tx_begin_ms=${Math.round(performance.now() - txT0)} isolation=${iso ?? "?"}`);
     }
+    /**
+     * Fair claim: one SELECT on `job_wallets` + `jobs`, DISTINCT ON (signer), `FOR UPDATE OF jw SKIP LOCKED`
+     * on wallet rows only (no window-function CTE that would skip row-level locks).
+     */
     const sql = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
        jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
               jw.retry_count AS "retryCount", (${CLAIM_ES_JW_J}) AS "signerAddress",
@@ -645,6 +653,49 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
           queuedJobsApprox,
           blockers: blockers.length ? blockers : undefined,
         });
+      }
+      const blockersPost = collectQueueClaimBlockers();
+      if (!blockersPost.length) {
+        const now = Date.now();
+        if (now - lastClaimStarvationLogMs >= CLAIM_STARVATION_LOG_COOLDOWN_MS) {
+          try {
+            const d = await getQueueClaimDiagnostics();
+            if (d.matchingClaimSql > 0) {
+              lastClaimStarvationLogMs = now;
+              const staleBefore = new Date(Date.now() - queueStaleProcessingThresholdMs());
+              const staleRows = await pgQuery<{ c: string }>(
+                pool,
+                `SELECT COUNT(*)::text AS c FROM job_wallets WHERE status = 'processing' AND updated_at < ?`,
+                [staleBefore],
+              );
+              const jobQ = await pgQuery<{ c: string }>(
+                pool,
+                `SELECT COUNT(*)::text AS c FROM jobs WHERE status IN ('queued', 'running') AND paused IS NOT TRUE`,
+              );
+              console.warn(
+                JSON.stringify({
+                  event: "queue_claim_empty_but_sql_matches_pending",
+                  workerId: workerId.slice(0, 64),
+                  claimBatchSize: batch,
+                  claimablePendingApprox: d.matchingClaimSql,
+                  queueGlobalPaused: d.globalPaused,
+                  processingEnabled: getQueueRuntimeFlagsSync().processingEnabled,
+                  normalizedQueueV2: getQueueRuntimeFlagsSync().normalizedQueueV2,
+                  activeQueuedOrRunningUnpausedJobs: Number(jobQ[0]?.c ?? 0),
+                  processingStaleBeyondThreshold: Number(staleRows[0]?.c ?? 0),
+                  walletsByStatus: d.walletsByStatus,
+                  pendingBlockedByJobState: d.pendingBlockedByJobState,
+                  pendingBackoffFuture: d.pendingBackoffFuture,
+                  pendingRetryCap: d.pendingRetryCap,
+                  reason:
+                    "Claim SELECT returned 0 while a simpler pending COUNT is >0 — signer blocked by global processing, SKIP_LOCKED contention, DISTINCT ON signer starvation, or stale processing rows not yet reset.",
+                }),
+              );
+            }
+          } catch (logErr) {
+            console.warn("[queue-claim] claim_starvation_snapshot_failed", logErr);
+          }
+        }
       }
       return [];
     }
@@ -937,20 +988,63 @@ export async function recordWalletFailure(
   await maybeAutoRerunLoopJob(jobId);
 }
 
-/** Recover rows stuck in processing (worker crash). */
+/** Recover rows stuck in processing (worker crash). Preserves `retry_count`; appends audit text to `error_message`. */
 export async function reconcileStaleProcessingRows(): Promise<number> {
   const pool = await getPostgresPool();
-  const ms = queueStaleProcessingMs();
+  const ms = queueStaleProcessingThresholdMs();
   const before = new Date(Date.now() - ms);
   const maxAttempts = queueMaxAttempts();
   const result = await pgExecute(
     pool,
     `UPDATE job_wallets
-     SET status = 'pending', assigned_worker = NULL, next_attempt_at = NULL, updated_at = NOW()
+     SET status = 'pending',
+         assigned_worker = NULL,
+         next_attempt_at = NULL,
+         error_message = LEFT(
+           COALESCE(error_message, '') || ' | stale processing reset (was worker ' || COALESCE(assigned_worker, '?') || ')',
+           8000
+         ),
+         updated_at = NOW()
      WHERE status = 'processing'
        AND updated_at < ?
        AND retry_count < ?`,
     [before, maxAttempts],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
+ * Recompute `jobs.status` from `job_wallets` for every job that has wallet rows.
+ * Fixes jobs left `running`/`queued` when all wallets are already terminal (completed/failed only).
+ */
+export async function reconcileAllJobStatusesFromWallets(): Promise<number> {
+  const pool = await getPostgresPool();
+  const result = await pgExecute(
+    pool,
+    `WITH computed AS (
+       SELECT j.id,
+         CASE
+           WHEN j.paused IS TRUE THEN j.status
+           WHEN j.status IN ('draft', 'cancelled') THEN j.status
+           WHEN EXISTS (
+             SELECT 1 FROM job_wallets jw
+             WHERE jw.job_id = j.id AND jw.status IN ('pending', 'processing')
+           ) THEN CASE WHEN j.status = 'draft' THEN j.status ELSE 'running' END
+           WHEN EXISTS (
+             SELECT 1 FROM job_wallets jw
+             WHERE jw.job_id = j.id AND jw.status = 'failed'
+           ) THEN 'failed'
+           ELSE 'completed'
+         END AS new_status
+       FROM jobs j
+       WHERE EXISTS (SELECT 1 FROM job_wallets jw WHERE jw.job_id = j.id)
+     )
+     UPDATE jobs j
+     SET status = c.new_status,
+         updated_at = NOW()
+     FROM computed c
+     WHERE j.id = c.id AND j.status IS DISTINCT FROM c.new_status`,
+    [],
   );
   return result.rowCount ?? 0;
 }
@@ -1169,6 +1263,7 @@ export async function adminRecoverStalledQueue(options?: { promoteDrafts?: boole
 }> {
   const promoteDrafts = options?.promoteDrafts !== false;
   const staleProcessingReset = await reconcileStaleProcessingRows();
+  await reconcileAllJobStatusesFromWallets().catch(() => {});
   let draftJobsPromoted = 0;
   if (promoteDrafts) {
     const ids = await adminListDraftJobIdsWithPendingWallets();

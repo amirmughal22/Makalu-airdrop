@@ -28,7 +28,8 @@
     "production:start": "bash scripts/production-start.sh",
     "migrate-old-jobs": "node --env-file=.env ./node_modules/tsx/dist/cli.mjs scripts/migrate-old-jobs.ts",
     "queue:admin": "node --env-file=.env ./node_modules/tsx/dist/cli.mjs scripts/queue-admin.ts",
-    "queue:diagnose": "node --env-file=.env ./node_modules/tsx/dist/cli.mjs scripts/queue-admin.ts diagnose",
+    "queue:diagnose": "node --env-file=.env scripts/diagnose-stuck-queue.mjs",
+    "queue:repair-stuck": "node --env-file=.env scripts/queue-repair-stuck.mjs",
     "bench:pending-count": "node --env-file=.env scripts/benchmark-pending-count.mjs",
     "bench:queue-claim": "node --env-file=.env scripts/bench-queue-claim.mjs"
   },

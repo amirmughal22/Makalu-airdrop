@@ -72,6 +72,14 @@ export function queueStaleProcessingMs(): number {
   return envInt("AIRDROP_QUEUE_STALE_PROCESSING_MS", 10 * 60_000, 30_000, 24 * 60 * 60_000);
 }
 
+/**
+ * Age threshold for treating `processing` as abandoned (worker crash / hang).
+ * Capped at **5 minutes** so stuck rows recover without adding new env vars (see `AIRDROP_QUEUE_STALE_PROCESSING_MS` for shorter overrides).
+ */
+export function queueStaleProcessingThresholdMs(): number {
+  return Math.min(queueStaleProcessingMs(), 5 * 60_000);
+}
+
 export function queueWorkerPollMs(): number {
   return envInt("AIRDROP_QUEUE_WORKER_POLL_MS", 500, 50, 60_000);
 }
