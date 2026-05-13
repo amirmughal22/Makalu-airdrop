@@ -1,0 +1,2 @@
+-- Optional reference migration: fund transfer worker queue (also applied via ensureQueueJobsSchema at pool bootstrap).
+-- Tables: fund_transfer_jobs, fund_transfer_queue — see src/lib/queue/postgres-queue-schema.ts

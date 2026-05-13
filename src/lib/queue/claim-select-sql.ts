@@ -39,3 +39,22 @@ export function claimWalletBatchOrderBy(walletAlias: string, jobAlias: string): 
 
 export const CLAIM_WALLET_ORDER_BY_JW_J = claimWalletBatchOrderBy("jw", "j");
 export const CLAIM_WALLET_ORDER_BY_JW2_J2 = claimWalletBatchOrderBy("jw2", "j2");
+
+/** Block when a normalized `job_wallets` row is `processing` with the same effective signer (any job). */
+export function claimNotBlockedByProcessingJobWallets(signerLowerTrimExpr: string): string {
+  return `NOT EXISTS (
+    SELECT 1 FROM job_wallets px
+    INNER JOIN jobs jp ON jp.id = px.job_id
+    WHERE px.status = 'processing'
+      AND lower(trim(${CLAIM_ES_PX_JP})) = ${signerLowerTrimExpr}
+  )`;
+}
+
+/** Block when a `fund_transfer_queue` row is `processing` for the same signer (cross-queue nonce safety). */
+export function claimNotBlockedByProcessingFundTransfers(signerLowerTrimExpr: string): string {
+  return `NOT EXISTS (
+    SELECT 1 FROM fund_transfer_queue ftx
+    WHERE ftx.status = 'processing'
+      AND lower(trim(ftx.signer_address)) = ${signerLowerTrimExpr}
+  )`;
+}

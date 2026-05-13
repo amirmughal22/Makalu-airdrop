@@ -302,6 +302,21 @@ export default function MakaluAirdropSuite({
   const [fundLastResults, setFundLastResults] = useState<Array<{ to: string; txHash?: string; error?: string }> | null>(
     null,
   );
+  const [fundQueueBatchId, setFundQueueBatchId] = useState("");
+  const [fundQueueFromIdx, setFundQueueFromIdx] = useState("1");
+  const [fundQueueToIdx, setFundQueueToIdx] = useState("");
+  const [fundQueueAmount, setFundQueueAmount] = useState("1");
+  const [fundQueueSigner, setFundQueueSigner] = useState("");
+  const [fundQueueJobId, setFundQueueJobId] = useState("");
+  const [fundQueueStats, setFundQueueStats] = useState<{
+    total: number;
+    pending: number;
+    processing: number;
+    completed: number;
+    failed: number;
+    txLast1m: number;
+  } | null>(null);
+  const [fundQueueNotice, setFundQueueNotice] = useState("");
   const [balancesRefreshing, setBalancesRefreshing] = useState(false);
   const [walletImportNotice, setWalletImportNotice] = useState("");
   /** Bulk-register from env `AIRDROP_HD_MNEMONIC` indices (same derivation as Generate). */
@@ -1817,6 +1832,87 @@ export default function MakaluAirdropSuite({
     }
   }
 
+  async function createFundQueueJobFromBatch() {
+    try {
+      setBusy(true);
+      setError("");
+      setFundQueueNotice("");
+      if (!sessionVerified) throw new Error("Verify session first");
+      if (!fundQueueBatchId.trim()) throw new Error("Enter a generated wallet batch UUID");
+      const from = parseInt(fundQueueFromIdx.trim(), 10);
+      const to = parseInt(fundQueueToIdx.trim(), 10);
+      if (!Number.isFinite(from) || !Number.isFinite(to) || from < 1 || to < from) throw new Error("Invalid index range");
+      const signer = (fundQueueSigner || fundFromAddress).trim().toLowerCase();
+      if (!signer.startsWith("0x")) throw new Error("Select signer (distribution wallet)");
+      const amt = Number(fundQueueAmount.trim());
+      if (!fundQueueAmount.trim() || !Number.isFinite(amt) || amt <= 0) throw new Error("Enter amount per wallet");
+      if (fundMode === "erc20" && !fundTokenAddress.trim()) throw new Error("Token contract is required for ERC-20");
+
+      const body: Record<string, unknown> = {
+        batchId: fundQueueBatchId.trim(),
+        fromWalletIndex: from,
+        toWalletIndex: to,
+        amountPerWallet: fundQueueAmount.trim(),
+        signerAddress: signer,
+        mode: fundMode,
+        chainId: net.chainId,
+      };
+      if (fundMode === "erc20") body.tokenAddress = fundTokenAddress.trim();
+
+      const res = await fetch("/api/airdrop/fund-transfer-jobs", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(body),
+      });
+      const data = await parseApiJson<{ jobId: string; rowsInserted: number }>(res, "Create fund transfer job failed");
+      setFundQueueJobId(data.jobId);
+      setFundQueueNotice(`Queued ${data.rowsInserted} transfer row(s). Job id: ${data.jobId}`);
+      await refreshFundQueueStats(data.jobId);
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshFundQueueStats(jobId?: string) {
+    const id = (jobId || fundQueueJobId).trim();
+    if (!id || !sessionVerified) return;
+    try {
+      const res = await fetch(`/api/airdrop/fund-transfer-jobs/${encodeURIComponent(id)}`, { headers: authHeaders() });
+      const data = await parseApiJson<{
+        total: number;
+        pending: number;
+        processing: number;
+        completed: number;
+        failed: number;
+        txLast1m: number;
+      }>(res, "Load stats failed");
+      setFundQueueStats(data);
+    } catch (e) {
+      setError(formatError(e));
+    }
+  }
+
+  async function retryFailedFundQueueJob() {
+    if (!fundQueueJobId.trim()) return;
+    try {
+      setBusy(true);
+      setError("");
+      const res = await fetch(
+        `/api/airdrop/fund-transfer-jobs/${encodeURIComponent(fundQueueJobId.trim())}/retry-failed`,
+        { method: "POST", headers: authHeaders() },
+      );
+      const data = await parseApiJson<{ resetRows: number }>(res, "Retry failed");
+      setFundQueueNotice(`Reset ${data.resetRows} failed row(s) to pending.`);
+      await refreshFundQueueStats();
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function logout() {
     clearSessionState();
     setStatus("logged-out");
@@ -2515,6 +2611,123 @@ export default function MakaluAirdropSuite({
                             </li>
                           ))}
                         </ul>
+                      ) : null}
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+            ) : null}
+
+            {dashboardMode && dashSection === "fund-distribution" ? (
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-xl">Fund generated wallets (worker queue)</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4 text-sm">
+                  <p className="text-slate-600 dark:text-slate-400">
+                    Creates DB rows only. <strong>PM2 / external workers</strong> (
+                    <code className="rounded bg-slate-100 px-1 dark:bg-black">npm run worker:queue:pm2</code>) claim and
+                    send using the same transfer path as normalized airdrops — not this browser session.
+                  </p>
+                  {!sessionVerified ? (
+                    <p className="text-slate-500 dark:text-slate-400">Verify session to use this section.</p>
+                  ) : (
+                    <>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Use the same asset settings as above (Fund distributor wallets). Batch must be{" "}
+                        <strong>completed</strong>. Get batch UUID from{" "}
+                        <Link href="/dashboard/wallet-batches" className="text-blue-600 underline dark:text-blue-400">
+                          Wallet batches
+                        </Link>
+                        .
+                      </p>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-1 md:col-span-2">
+                          <Label htmlFor="fq-batch">Generated batch id (UUID)</Label>
+                          <Input
+                            id="fq-batch"
+                            className="font-mono text-xs"
+                            value={fundQueueBatchId}
+                            onChange={(e) => setFundQueueBatchId(e.target.value)}
+                            disabled={busy}
+                            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="fq-from">From wallet index (inclusive)</Label>
+                          <Input
+                            id="fq-from"
+                            value={fundQueueFromIdx}
+                            onChange={(e) => setFundQueueFromIdx(e.target.value)}
+                            disabled={busy}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="fq-to">To wallet index (inclusive)</Label>
+                          <Input
+                            id="fq-to"
+                            value={fundQueueToIdx}
+                            onChange={(e) => setFundQueueToIdx(e.target.value)}
+                            disabled={busy}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="fq-amt">Amount per wallet</Label>
+                          <Input
+                            id="fq-amt"
+                            value={fundQueueAmount}
+                            onChange={(e) => setFundQueueAmount(e.target.value)}
+                            disabled={busy}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label>Signer (distribution wallet)</Label>
+                          <select
+                            className="flex h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm dark:border-[#333333] dark:bg-[#111111]"
+                            value={fundQueueSigner || fundFromAddress}
+                            disabled={busy || distributorWallets.length === 0}
+                            onChange={(e) => setFundQueueSigner(e.target.value)}
+                          >
+                            {distributorWallets.map((w) => (
+                              <option key={w.address} value={w.address}>
+                                {(w.label || shortAddr(w.address)) + " · " + shortAddr(w.address)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="button" onClick={() => void createFundQueueJobFromBatch()} disabled={busy}>
+                          Queue transfers
+                        </Button>
+                        <Button type="button" variant="outline" onClick={() => void refreshFundQueueStats()} disabled={busy}>
+                          Refresh stats
+                        </Button>
+                        <Button type="button" variant="outline" onClick={() => void retryFailedFundQueueJob()} disabled={busy}>
+                          Retry failed (reset to pending)
+                        </Button>
+                      </div>
+                      {fundQueueNotice ? (
+                        <Alert className="rounded-xl border-emerald-200 bg-emerald-50 dark:border-emerald-900/40 dark:bg-emerald-950/30">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-400" />
+                          <AlertTitle className="text-emerald-900 dark:text-emerald-200">Fund queue</AlertTitle>
+                          <AlertDescription className="text-emerald-900/90 dark:text-emerald-100/90">
+                            {fundQueueNotice}
+                          </AlertDescription>
+                        </Alert>
+                      ) : null}
+                      {fundQueueStats ? (
+                        <div className="rounded-lg border border-slate-200 p-3 text-xs dark:border-[#333333]">
+                          <p className="mb-2 font-medium text-slate-800 dark:text-slate-200">Job {fundQueueJobId || "—"}</p>
+                          <ul className="grid gap-1 sm:grid-cols-2">
+                            <li>Total: {fundQueueStats.total}</li>
+                            <li>Pending: {fundQueueStats.pending}</li>
+                            <li>Processing: {fundQueueStats.processing}</li>
+                            <li>Completed: {fundQueueStats.completed}</li>
+                            <li>Failed: {fundQueueStats.failed}</li>
+                            <li>Completed (last 1 min): {fundQueueStats.txLast1m}</li>
+                          </ul>
+                        </div>
                       ) : null}
                     </>
                   )}

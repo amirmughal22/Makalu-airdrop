@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
-import { createPublicClient, createWalletClient, isAddress, parseEther, parseUnits } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
-import { MAKALU_CHAIN_ID_DECIMAL, httpTransportForChainId, isSupportedChainId, viemChainForChainId } from "@/lib/chain";
+import { isAddress } from "viem";
+import { MAKALU_CHAIN_ID_DECIMAL, isSupportedChainId } from "@/lib/chain";
 import { getOwnerWalletPrivateKey, isKnownDistributorAddress } from "@/lib/distributor-wallet-store";
-import { erc20Abi } from "@/lib/erc20";
 import { humanizeAirdropError } from "@/lib/humanize-airdrop-error";
 import { requireDistributorSession } from "@/lib/session";
 import { FUND_DISTRIBUTE_MAX_RECIPIENTS } from "@/lib/fund-distribute";
-import { interChunkDelayMs, sleep, withTransientRpcRetries } from "@/lib/rpc-retry";
+import { interChunkDelayMs, sleep } from "@/lib/rpc-retry";
+import { executeEvmTransfer } from "@/lib/transfers/fund-transfer-service";
 
 /** Allow long sequential funding runs (many txs + RPC retries). Platform must support it (e.g. Vercel `maxDuration`). */
 export const maxDuration = 300;
@@ -62,7 +61,7 @@ export async function POST(request: Request) {
       );
     }
 
-    let tokenAddress: `0x${string}` | undefined;
+    let tokenAddress: `0x${string}` | null = null;
     if (mode === "erc20") {
       const ta = String(body.tokenAddress || "").trim().toLowerCase();
       if (!ta || !isAddress(ta)) {
@@ -81,59 +80,22 @@ export async function POST(request: Request) {
       }
     }
 
-    const pk = getOwnerWalletPrivateKey(owner, fromAddress)!;
-    const account = privateKeyToAccount(pk);
-    const chain = viemChainForChainId(chainId);
-    const transport = httpTransportForChainId(chainId);
-    const walletClient = createWalletClient({ account, chain, transport });
-    const publicClient = createPublicClient({ chain, transport });
-
-    let decimals = 18;
-    let amountWei: bigint;
-    if (mode === "erc20" && tokenAddress) {
-      try {
-        const d = await publicClient.readContract({
-          address: tokenAddress,
-          abi: erc20Abi,
-          functionName: "decimals",
-        });
-        decimals = Number(d);
-        if (!Number.isFinite(decimals) || decimals < 0 || decimals > 36) decimals = 18;
-      } catch {
-        decimals = 18;
-      }
-      amountWei = parseUnits(amountStr, decimals);
-    } else {
-      amountWei = parseEther(amountStr);
-    }
-
     const results: { to: string; txHash?: string; error?: string }[] = [];
     const gap = interChunkDelayMs();
 
     for (let i = 0; i < toAddresses.length; i++) {
       const to = toAddresses[i]!;
       try {
-        const hash =
-          mode === "native"
-            ? await withTransientRpcRetries(
-                () =>
-                  walletClient.sendTransaction({
-                    to: to as `0x${string}`,
-                    value: amountWei,
-                  }),
-                `distribute native ${to.slice(0, 10)}`,
-              )
-            : await withTransientRpcRetries(
-                () =>
-                  walletClient.writeContract({
-                    address: tokenAddress!,
-                    abi: erc20Abi,
-                    functionName: "transfer",
-                    args: [to as `0x${string}`, amountWei],
-                  }),
-                `distribute erc20 ${to.slice(0, 10)}`,
-              );
-        results.push({ to, txHash: hash });
+        const { txHash } = await executeEvmTransfer({
+          mode,
+          tokenAddress: mode === "erc20" ? tokenAddress : null,
+          chainId,
+          owner,
+          signerAddress: fromAddress,
+          recipient: to as `0x${string}`,
+          amount: amountStr,
+        });
+        results.push({ to, txHash });
       } catch (e) {
         results.push({ to, error: humanizeAirdropError(e) });
       }

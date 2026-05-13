@@ -98,6 +98,104 @@ WHERE jw.id = r.id AND r.rn > 1`);
   );
 
   await db.query(`
+CREATE TABLE IF NOT EXISTS fund_transfer_jobs (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  owner VARCHAR(66) NOT NULL,
+  name VARCHAR(255) NULL,
+  generated_batch_id UUID NOT NULL,
+  from_wallet_index INT NOT NULL,
+  to_wallet_index INT NOT NULL,
+  amount_per_wallet VARCHAR(128) NOT NULL,
+  signer_address VARCHAR(66) NOT NULL,
+  mode VARCHAR(16) NOT NULL DEFAULT 'native',
+  token_address VARCHAR(42) NULL,
+  chain_id INT NOT NULL,
+  total_rows INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`);
+
+  await db.query(`
+CREATE TABLE IF NOT EXISTS fund_transfer_queue (
+  id BIGSERIAL PRIMARY KEY,
+  fund_transfer_job_id VARCHAR(64) NOT NULL REFERENCES fund_transfer_jobs(id) ON DELETE CASCADE,
+  transfer_type VARCHAR(32) NOT NULL DEFAULT 'airdrop_fund_transfer',
+  owner VARCHAR(66) NOT NULL,
+  generated_batch_id UUID NOT NULL,
+  wallet_index INT NOT NULL,
+  signer_address VARCHAR(66) NOT NULL,
+  target_wallet_address VARCHAR(66) NOT NULL,
+  amount VARCHAR(128) NOT NULL,
+  mode VARCHAR(16) NOT NULL,
+  token_address VARCHAR(42) NULL,
+  chain_id INT NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','processing','completed','failed')),
+  assigned_worker VARCHAR(64) NULL,
+  tx_hash VARCHAR(128) NULL,
+  rpc_url VARCHAR(512) NULL,
+  retry_count INT NOT NULL DEFAULT 0,
+  error_message TEXT NULL,
+  next_attempt_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`);
+
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_fund_transfer_queue_job_status ON fund_transfer_queue (fund_transfer_job_id, status)`,
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_fund_transfer_queue_pending_claim ON fund_transfer_queue (status, next_attempt_at, id)`,
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_fund_transfer_jobs_owner_created ON fund_transfer_jobs (owner, created_at DESC)`,
+  );
+  await db.query(`
+WITH ranked AS (
+  SELECT id,
+         ROW_NUMBER() OVER (
+           PARTITION BY lower(trim(signer_address))
+           ORDER BY id ASC
+         ) AS rn
+  FROM fund_transfer_queue
+  WHERE status = 'processing'
+    AND signer_address IS NOT NULL
+    AND length(trim(signer_address)) > 0
+)
+UPDATE fund_transfer_queue ft
+SET status = 'pending',
+    assigned_worker = NULL,
+    updated_at = NOW()
+FROM ranked r
+WHERE ft.id = r.id AND r.rn > 1`);
+  await db.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_fund_transfer_queue_one_processing_per_signer
+     ON fund_transfer_queue (lower(trim(signer_address)))
+     WHERE status = 'processing' AND signer_address IS NOT NULL AND length(trim(signer_address)) > 0`,
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_fund_transfer_queue_completed_recent ON fund_transfer_queue (updated_at DESC) WHERE status = 'completed'`,
+  );
+
+  await db.query(`
+CREATE OR REPLACE FUNCTION fund_transfer_queue_touch_updated_at() RETURNS TRIGGER AS $$
+BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+$$ LANGUAGE plpgsql`);
+  await db.query(`DROP TRIGGER IF EXISTS trg_fund_transfer_queue_updated_at ON fund_transfer_queue`);
+  await db.query(`
+CREATE TRIGGER trg_fund_transfer_queue_updated_at
+BEFORE UPDATE ON fund_transfer_queue FOR EACH ROW EXECUTE PROCEDURE fund_transfer_queue_touch_updated_at()`);
+
+  await db.query(`
+CREATE OR REPLACE FUNCTION fund_transfer_jobs_touch_updated_at() RETURNS TRIGGER AS $$
+BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+$$ LANGUAGE plpgsql`);
+  await db.query(`DROP TRIGGER IF EXISTS trg_fund_transfer_jobs_updated_at ON fund_transfer_jobs`);
+  await db.query(`
+CREATE TRIGGER trg_fund_transfer_jobs_updated_at
+BEFORE UPDATE ON fund_transfer_jobs FOR EACH ROW EXECUTE PROCEDURE fund_transfer_jobs_touch_updated_at()`);
+
+  await db.query(`
 CREATE TABLE IF NOT EXISTS queue_worker_heartbeats (
   worker_id VARCHAR(64) NOT NULL PRIMARY KEY,
   hostname VARCHAR(255) NULL,

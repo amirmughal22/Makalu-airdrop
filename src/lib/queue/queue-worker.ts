@@ -1,5 +1,5 @@
 import { MAKALU_CHAIN_ID_DECIMAL } from "../chain";
-import { executeEvmTransfer, readErc20Decimals } from "../evm-send-transfer";
+import { executeEvmTransfer, readErc20Decimals } from "../transfers/fund-transfer-service";
 import { humanizeAirdropError } from "../humanize-airdrop-error";
 import { interChunkDelayMs, maxParallelTxsPerWave, sleep } from "../rpc-retry";
 import {
@@ -9,6 +9,13 @@ import {
   reconcileAllJobStatusesFromWallets,
   reconcileStaleProcessingRows,
 } from "./job-queue-repo";
+import {
+  claimFundTransferBatch,
+  recordFundTransferFailure,
+  recordFundTransferSuccess,
+  reconcileStaleFundTransferProcessing,
+  type ClaimedFundTransferRow,
+} from "./fund-transfer-queue-repo";
 import { acquireTxSendBudget } from "./tx-rate-limiter";
 import {
   queueAdaptiveParallelEnabled,
@@ -72,6 +79,44 @@ export async function processClaimedWalletRow(row: ClaimedWalletRow): Promise<bo
     return true;
   } catch (e) {
     await recordWalletFailure(row.id, row.jobId, humanizeAirdropError(e), row.retryCount);
+    return false;
+  }
+}
+
+async function erc20DecimalsCachedFund(row: ClaimedFundTransferRow): Promise<number> {
+  if (row.mode !== "erc20" || !row.tokenAddress) return 18;
+  const key = `${row.chainId}:${(row.tokenAddress ?? "").toLowerCase()}`;
+  const hit = decimalsCache.get(key);
+  if (hit != null) return hit;
+  const d = await readErc20Decimals(
+    row.tokenAddress as `0x${string}`,
+    row.chainId || MAKALU_CHAIN_ID_DECIMAL,
+  );
+  decimalsCache.set(key, d);
+  return d;
+}
+
+export async function processClaimedFundTransferRow(row: ClaimedFundTransferRow): Promise<boolean> {
+  if (!row.signerAddress) {
+    await recordFundTransferFailure(row.id, "Missing signer_address on fund transfer row", row.retryCount);
+    return false;
+  }
+  try {
+    const tokenDecimals = await erc20DecimalsCachedFund(row);
+    const { txHash, rpcUrl } = await executeEvmTransfer({
+      mode: row.mode,
+      tokenAddress: row.tokenAddress,
+      chainId: row.chainId,
+      owner: row.owner,
+      signerAddress: row.signerAddress,
+      recipient: row.targetWalletAddress as `0x${string}`,
+      amount: row.amount,
+      tokenDecimals: row.mode === "erc20" ? tokenDecimals : undefined,
+    });
+    await recordFundTransferSuccess(row.id, txHash, rpcUrl);
+    return true;
+  } catch (e) {
+    await recordFundTransferFailure(row.id, humanizeAirdropError(e), row.retryCount);
     return false;
   }
 }
@@ -160,6 +205,12 @@ export async function runAirdropQueueWorker(
           console.error("[queue-worker] job status reconcile after stale reset failed", e);
         }
       }
+      try {
+        const nf = await reconcileStaleFundTransferProcessing();
+        if (nf > 0) console.log(`[queue-worker] reconciled ${nf} stale fund transfer row(s)`);
+      } catch (e) {
+        console.error("[queue-worker] fund transfer stale reconciliation failed", e);
+      }
     } catch (e) {
       console.error("[queue-worker] stale reconciliation failed", e);
     }
@@ -196,7 +247,91 @@ export async function runAirdropQueueWorker(
       }),
     );
 
-    if (!batch.length) {
+    if (batch.length) {
+    const baseParallel = maxParallelTxsPerWave();
+    const parallelWave =
+      batch.length > 0 && queueAdaptiveParallelEnabled()
+        ? Math.max(1, Math.round(baseParallel * (1 - 0.65 * Math.min(1, lastBatchFailRatio))))
+        : Math.max(1, baseParallel);
+
+    /** One row per signer per wave — avoids EVM nonce races; multiple signers still run in parallel. */
+    const bySigner = new Map<string, ClaimedWalletRow[]>();
+    for (const r of batch) {
+      const key = `${r.owner.toLowerCase()}:${(r.signerAddress ?? "").toLowerCase()}`;
+      if (!bySigner.has(key)) bySigner.set(key, []);
+      bySigner.get(key)!.push(r);
+    }
+    const signerQueues = [...bySigner.values()];
+
+    const chunkGap = interChunkDelayMs();
+    let batchOk = 0;
+    let batchFail = 0;
+    let rr = 0;
+    while (signerQueues.some((q) => q.length)) {
+      const wave: ClaimedWalletRow[] = [];
+      for (let i = 0; i < signerQueues.length && wave.length < parallelWave; i++) {
+        const idx = (rr + i) % signerQueues.length;
+        const q = signerQueues[idx]!;
+        if (q.length) wave.push(q.shift()!);
+      }
+      if (!wave.length) break;
+      rr = (rr + 1) % signerQueues.length;
+
+      for (const row of wave) {
+        await acquireTxSendBudget(row.signerAddress!);
+      }
+
+      const outcomes = await Promise.all(wave.map((row) => processClaimedWalletRow(row)));
+      for (const ok of outcomes) {
+        if (ok) {
+          batchOk++;
+          cumulativeOk++;
+        } else {
+          batchFail++;
+          cumulativeFail++;
+        }
+      }
+      if (signerQueues.some((q) => q.length) && chunkGap > 0) await sleep(chunkGap);
+    }
+    lastBatchFailRatio = batch.length ? batchFail / batch.length : 0;
+    const jobIds = [...new Set(batch.map((r) => r.jobId))];
+    const activeJobId = jobIds.length === 1 ? jobIds[0]! : null;
+    fileLog?.log("metric", "batch_complete", {
+      claimed: batch.length,
+      ok: batchOk,
+      fail: batchFail,
+      activeJobId,
+    });
+    try {
+      await upsertWorkerHeartbeat({
+        workerId,
+        iterations: iteration,
+        rowsOk: cumulativeOk,
+        rowsFail: cumulativeFail,
+        lastBatchSize: batch.length,
+        activeJobId,
+      });
+    } catch (e) {
+      console.error("[queue-worker] heartbeat upsert failed after batch", e instanceof Error ? e.stack ?? e.message : e);
+    }
+    try {
+      const jr = await reconcileAllJobStatusesFromWallets();
+      if (jr > 0) {
+        console.log(`[queue-worker] reconciled ${jr} parent job status row(s) after batch`);
+      }
+    } catch (e) {
+      console.error("[queue-worker] reconcileAllJobStatusesFromWallets failed", e);
+    }
+    }
+
+    let fundBatch: ClaimedFundTransferRow[] = [];
+    try {
+      fundBatch = await claimFundTransferBatch(workerId);
+    } catch (e) {
+      console.error("[queue-worker] fund transfer claim exception", e instanceof Error ? e.stack ?? e.message : e);
+    }
+
+    if (!batch.length && !fundBatch.length) {
       if (iteration % runtimeCheckEvery === 0) {
         await refreshQueueRuntimeCache();
         const blockers = collectQueueClaimBlockers();
@@ -301,81 +436,67 @@ export async function runAirdropQueueWorker(
       continue;
     }
 
-    const baseParallel = maxParallelTxsPerWave();
-    const parallelWave =
-      batch.length > 0 && queueAdaptiveParallelEnabled()
-        ? Math.max(1, Math.round(baseParallel * (1 - 0.65 * Math.min(1, lastBatchFailRatio))))
-        : Math.max(1, baseParallel);
-
-    /** One row per signer per wave — avoids EVM nonce races; multiple signers still run in parallel. */
-    const bySigner = new Map<string, ClaimedWalletRow[]>();
-    for (const r of batch) {
-      const key = `${r.owner.toLowerCase()}:${(r.signerAddress ?? "").toLowerCase()}`;
-      if (!bySigner.has(key)) bySigner.set(key, []);
-      bySigner.get(key)!.push(r);
-    }
-    const signerQueues = [...bySigner.values()];
-
-    const chunkGap = interChunkDelayMs();
-    let batchOk = 0;
-    let batchFail = 0;
-    let rr = 0;
-    while (signerQueues.some((q) => q.length)) {
-      const wave: ClaimedWalletRow[] = [];
-      for (let i = 0; i < signerQueues.length && wave.length < parallelWave; i++) {
-        const idx = (rr + i) % signerQueues.length;
-        const q = signerQueues[idx]!;
-        if (q.length) wave.push(q.shift()!);
+    if (fundBatch.length > 0) {
+      const baseParallelFt = maxParallelTxsPerWave();
+      const parallelWaveFt =
+        fundBatch.length > 0 && queueAdaptiveParallelEnabled()
+          ? Math.max(1, Math.round(baseParallelFt * (1 - 0.65 * Math.min(1, lastBatchFailRatio))))
+          : Math.max(1, baseParallelFt);
+      const bySignerFt = new Map<string, ClaimedFundTransferRow[]>();
+      for (const r of fundBatch) {
+        const key = `${r.owner.toLowerCase()}:${(r.signerAddress ?? "").toLowerCase()}`;
+        if (!bySignerFt.has(key)) bySignerFt.set(key, []);
+        bySignerFt.get(key)!.push(r);
       }
-      if (!wave.length) break;
-      rr = (rr + 1) % signerQueues.length;
-
-      for (const row of wave) {
-        await acquireTxSendBudget(row.signerAddress!);
-      }
-
-      const outcomes = await Promise.all(wave.map((row) => processClaimedWalletRow(row)));
-      for (const ok of outcomes) {
-        if (ok) {
-          batchOk++;
-          cumulativeOk++;
-        } else {
-          batchFail++;
-          cumulativeFail++;
+      const signerQueuesFt = [...bySignerFt.values()];
+      const chunkGapFt = interChunkDelayMs();
+      let fundOk = 0;
+      let fundFail = 0;
+      let rrFt = 0;
+      while (signerQueuesFt.some((q) => q.length)) {
+        const wave: ClaimedFundTransferRow[] = [];
+        for (let i = 0; i < signerQueuesFt.length && wave.length < parallelWaveFt; i++) {
+          const idx = (rrFt + i) % signerQueuesFt.length;
+          const q = signerQueuesFt[idx]!;
+          if (q.length) wave.push(q.shift()!);
         }
+        if (!wave.length) break;
+        rrFt = (rrFt + 1) % signerQueuesFt.length;
+        for (const row of wave) {
+          await acquireTxSendBudget(row.signerAddress!);
+        }
+        const outcomes = await Promise.all(wave.map((row) => processClaimedFundTransferRow(row)));
+        for (const ok of outcomes) {
+          if (ok) {
+            fundOk++;
+            cumulativeOk++;
+          } else {
+            fundFail++;
+            cumulativeFail++;
+          }
+        }
+        if (signerQueuesFt.some((q) => q.length) && chunkGapFt > 0) await sleep(chunkGapFt);
       }
-      if (signerQueues.some((q) => q.length) && chunkGap > 0) await sleep(chunkGap);
-    }
-    lastBatchFailRatio = batch.length ? batchFail / batch.length : 0;
-    const jobIds = [...new Set(batch.map((r) => r.jobId))];
-    const activeJobId = jobIds.length === 1 ? jobIds[0]! : null;
-    fileLog?.log("metric", "batch_complete", {
-      claimed: batch.length,
-      ok: batchOk,
-      fail: batchFail,
-      activeJobId,
-    });
-    try {
-      await upsertWorkerHeartbeat({
-        workerId,
-        iterations: iteration,
-        rowsOk: cumulativeOk,
-        rowsFail: cumulativeFail,
-        lastBatchSize: batch.length,
-        activeJobId,
+      fileLog?.log("metric", "fund_transfer_batch_complete", {
+        claimed: fundBatch.length,
+        ok: fundOk,
+        fail: fundFail,
       });
-    } catch (e) {
-      console.error("[queue-worker] heartbeat upsert failed after batch", e instanceof Error ? e.stack ?? e.message : e);
-    }
-    try {
-      const jr = await reconcileAllJobStatusesFromWallets();
-      if (jr > 0) {
-        console.log(`[queue-worker] reconciled ${jr} parent job status row(s) after batch`);
+      try {
+        await upsertWorkerHeartbeat({
+          workerId,
+          iterations: iteration,
+          rowsOk: cumulativeOk,
+          rowsFail: cumulativeFail,
+          lastBatchSize: fundBatch.length,
+          activeJobId: null,
+        });
+      } catch (e) {
+        console.error("[queue-worker] heartbeat upsert failed after fund batch", e instanceof Error ? e.stack ?? e.message : e);
       }
-    } catch (e) {
-      console.error("[queue-worker] reconcileAllJobStatusesFromWallets failed", e);
     }
-    if (interSleep > 0) await sleep(interSleep);
+
+    if (interSleep > 0 && (batch.length > 0 || fundBatch.length > 0)) await sleep(interSleep);
   }
 
   fileLog?.log("info", "queue_worker_stopped", { workerId, aborted: Boolean(signal?.aborted) });

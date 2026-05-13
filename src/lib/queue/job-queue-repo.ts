@@ -33,6 +33,7 @@ import {
   CLAIM_ES_PX_JP,
   CLAIM_JOB_ELIGIBLE_WHERE,
   CLAIM_WALLET_ORDER_BY_JW_J,
+  claimNotBlockedByProcessingFundTransfers,
 } from "./claim-select-sql";
 
 /** Throttle structured logs when claim returns 0 while SQL still sees claimable pending rows. */
@@ -630,6 +631,7 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
            WHERE px.status = 'processing'
              AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
+         AND ${claimNotBlockedByProcessingFundTransfers(`lower(trim(${CLAIM_ES_JW_J}))`)}
        ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
        LIMIT ?`;
     const sql = `SELECT picked.id AS id, picked."jobId" AS "jobId", picked."walletAddress" AS "walletAddress",
@@ -828,6 +830,7 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
            WHERE px.status = 'processing'
              AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
+         AND ${claimNotBlockedByProcessingFundTransfers(`lower(trim(${CLAIM_ES_JW_J}))`)}
        ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
        LIMIT ?`;
     const sql = `SELECT picked.id AS id, picked."jobId" AS "jobId", picked."walletAddress" AS "walletAddress",

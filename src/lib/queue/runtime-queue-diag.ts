@@ -7,6 +7,7 @@ import {
   CLAIM_ES_PX_JP,
   CLAIM_WALLET_ORDER_BY_JW2_J2,
   claimJobEligibleWhere,
+  claimNotBlockedByProcessingFundTransfers,
 } from "./claim-select-sql";
 import { isAirdropQueueV2EnvEnabled } from "./config";
 
@@ -40,6 +41,7 @@ export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
              WHERE px.status = 'processing'
                AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW2_J2}))
            )
+           AND ${claimNotBlockedByProcessingFundTransfers(`lower(trim(${CLAIM_ES_JW2_J2}))`)}
          ORDER BY lower(trim(${CLAIM_ES_JW2_J2})), ${CLAIM_WALLET_ORDER_BY_JW2_J2}
          LIMIT ?
        ) picked
