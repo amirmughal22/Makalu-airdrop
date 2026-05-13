@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { userInfo } from "node:os";
 import type { Pool } from "pg";
+import { CLAIM_ES_JW2_J2, CLAIM_ES_PX_JP } from "./claim-select-sql";
 import { isAirdropQueueV2EnvEnabled } from "./config";
 
 export function isRuntimeQueueDiagEnabled(): boolean {
@@ -17,7 +18,7 @@ export function isSqlExplainEnabled(): boolean {
 /** PUBLIC_CLAIM_SQL matches {@link claimWalletBatch} SELECT shape for EXPLAIN (no FOR UPDATE). */
 export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
        FROM (
-         SELECT DISTINCT ON (lower(trim(jw2.signer_address)))
+         SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW2_J2})))
            jw2.id
          FROM job_wallets jw2
          INNER JOIN jobs j2 ON j2.id = jw2.job_id
@@ -26,14 +27,14 @@ export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
            AND jw2.retry_count < ?
            AND j2.status IN ('queued', 'running')
            AND NOT j2.paused
-           AND jw2.signer_address IS NOT NULL
-           AND length(trim(jw2.signer_address)) > 0
+           AND (${CLAIM_ES_JW2_J2}) IS NOT NULL
            AND NOT EXISTS (
              SELECT 1 FROM job_wallets px
+             INNER JOIN jobs jp ON jp.id = px.job_id
              WHERE px.status = 'processing'
-               AND lower(trim(px.signer_address)) = lower(trim(jw2.signer_address))
+               AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW2_J2}))
            )
-         ORDER BY lower(trim(jw2.signer_address)), j2.queued_at ASC NULLS LAST, j2.id, jw2.id
+         ORDER BY lower(trim(${CLAIM_ES_JW2_J2})), j2.queued_at ASC NULLS LAST, j2.id, jw2.id
          LIMIT ?
        ) picked
        INNER JOIN job_wallets jw ON jw.id = picked.id`;

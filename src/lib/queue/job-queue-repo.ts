@@ -26,6 +26,11 @@ import { getBatchForOwner } from "../generated-wallet-repo";
 import { randomAmountsInRangeNative, randomAmountsInRangeToken } from "../split-amounts";
 import { getQueueRuntimeFlagsSync, refreshQueueRuntimeCache } from "./queue-runtime-settings";
 import type { ClaimedWalletRow, NormalizedJobRow } from "./types";
+import {
+  CLAIM_BACKFILL_SIGNER_FROM_JOB,
+  CLAIM_ES_JW_J,
+  CLAIM_ES_PX_JP,
+} from "./claim-select-sql";
 
 /** Drive job.status from wallet states — no COUNT(*) on job_wallets (hot path). */
 const REFRESH_JOB_STATUS_SQL = `UPDATE jobs j
@@ -596,9 +601,9 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
       const iso = await sessionIsolation(conn);
       console.info(`[claim-diag] tx_begin_ms=${Math.round(performance.now() - txT0)} isolation=${iso ?? "?"}`);
     }
-    const sql = `SELECT DISTINCT ON (lower(trim(jw.signer_address)))
+    const sql = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
        jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
-              jw.retry_count AS "retryCount", jw.signer_address AS "signerAddress",
+              jw.retry_count AS "retryCount", (${CLAIM_ES_JW_J}) AS "signerAddress",
               j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
@@ -607,14 +612,14 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
          AND jw.retry_count < ?
          AND j.status IN ('queued', 'running')
          AND NOT j.paused
-         AND jw.signer_address IS NOT NULL
-         AND length(trim(jw.signer_address)) > 0
+         AND (${CLAIM_ES_JW_J}) IS NOT NULL
          AND NOT EXISTS (
            SELECT 1 FROM job_wallets px
+           INNER JOIN jobs jp ON jp.id = px.job_id
            WHERE px.status = 'processing'
-             AND lower(trim(px.signer_address)) = lower(trim(jw.signer_address))
+             AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
-       ORDER BY lower(trim(jw.signer_address)), j.queued_at ASC NULLS LAST, j.id, jw.id
+       ORDER BY lower(trim(${CLAIM_ES_JW_J})), j.queued_at ASC NULLS LAST, j.id, jw.id
        LIMIT ?
        FOR UPDATE OF jw SKIP LOCKED`;
     if (diag) console.info("[claim-diag] claim_sql=", sql.replace(/\s+/g, " ").slice(0, 220) + "…");
@@ -650,7 +655,13 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
     try {
       await pgExecute(
         conn,
-        `UPDATE job_wallets SET status = 'processing', assigned_worker = ?, updated_at = NOW() WHERE id IN (${ph})`,
+        `UPDATE job_wallets jw
+         SET status = 'processing',
+             assigned_worker = ?,
+             updated_at = NOW(),
+             signer_address = ${CLAIM_BACKFILL_SIGNER_FROM_JOB}
+         FROM jobs j
+         WHERE j.id = jw.job_id AND jw.id IN (${ph})`,
         [workerId.slice(0, 64), ...ids],
       );
     } catch (e) {
@@ -724,9 +735,9 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
   const conn = await pool.connect();
   try {
     await conn.query("BEGIN");
-    const sql = `SELECT DISTINCT ON (lower(trim(jw.signer_address)))
+    const sql = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
        jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
-              jw.retry_count AS "retryCount", jw.signer_address AS "signerAddress",
+              jw.retry_count AS "retryCount", (${CLAIM_ES_JW_J}) AS "signerAddress",
               j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
@@ -735,14 +746,14 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
          AND jw.retry_count < ?
          AND j.status IN ('queued', 'running')
          AND NOT j.paused
-         AND jw.signer_address IS NOT NULL
-         AND length(trim(jw.signer_address)) > 0
+         AND (${CLAIM_ES_JW_J}) IS NOT NULL
          AND NOT EXISTS (
            SELECT 1 FROM job_wallets px
+           INNER JOIN jobs jp ON jp.id = px.job_id
            WHERE px.status = 'processing'
-             AND lower(trim(px.signer_address)) = lower(trim(jw.signer_address))
+             AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
-       ORDER BY lower(trim(jw.signer_address)), j.queued_at ASC NULLS LAST, j.id, jw.id
+       ORDER BY lower(trim(${CLAIM_ES_JW_J})), j.queued_at ASC NULLS LAST, j.id, jw.id
        LIMIT ?
        FOR UPDATE OF jw SKIP LOCKED`;
     const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, batch]);
@@ -754,7 +765,13 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
     const ph = ids.map(() => "?").join(",");
     await pgExecute(
       conn,
-      `UPDATE job_wallets SET status = 'processing', assigned_worker = ?, updated_at = NOW() WHERE id IN (${ph})`,
+      `UPDATE job_wallets jw
+       SET status = 'processing',
+           assigned_worker = ?,
+           updated_at = NOW(),
+           signer_address = ${CLAIM_BACKFILL_SIGNER_FROM_JOB}
+       FROM jobs j
+       WHERE j.id = jw.job_id AND jw.id IN (${ph})`,
       [workerId.slice(0, 64), ...ids],
     );
     const jobIds = [...new Set(rows.map((r) => String(r.jobId)))];
@@ -1047,7 +1064,8 @@ export async function getQueueClaimDiagnostics(): Promise<QueueClaimDiagnostics>
        AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
        AND jw.retry_count < ?
        AND j.status IN ('queued', 'running')
-       AND NOT j.paused`,
+       AND NOT j.paused
+       AND (${CLAIM_ES_JW_J}) IS NOT NULL`,
     [maxAttempts],
   );
   const matchingClaimSql = Number(matchRows[0]?.c ?? 0);
