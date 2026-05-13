@@ -490,6 +490,32 @@ export async function startNormalizedJob(jobId: string, ownerLower: string): Pro
   return result.rowCount === 1;
 }
 
+/**
+ * Dashboard "Start now": unblocks claiming for a job stuck in `queued` or user-paused `running` → `paused`.
+ * Sets `running`, clears schedule, and unpauses when there is pending or in-flight wallet work.
+ */
+export async function unpauseNormalizedJobNow(jobId: string, ownerLower: string): Promise<boolean> {
+  const pool = await getPostgresPool();
+  const result = await pgExecute(
+    pool,
+    `UPDATE jobs j
+     SET paused = FALSE,
+         scheduled_at = NULL,
+         status = 'running',
+         queued_at = COALESCE(j.queued_at, NOW()),
+         updated_at = NOW()
+     WHERE j.id = ?
+       AND j.owner = ?
+       AND j.status IN ('queued', 'paused')
+       AND EXISTS (
+         SELECT 1 FROM job_wallets jw
+         WHERE jw.job_id = j.id AND jw.status IN ('pending', 'processing')
+       )`,
+    [jobId, ownerLower],
+  );
+  return result.rowCount === 1;
+}
+
 export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletRow[]> {
   const diag = isRuntimeQueueDiagEnabled();
   const tStart = diag ? performance.now() : 0;

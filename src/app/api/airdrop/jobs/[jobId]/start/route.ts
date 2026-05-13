@@ -4,7 +4,7 @@ import { getJob, saveJob } from "@/lib/job-service";
 import type { StoredJob } from "@/lib/job-types";
 import { triggerQueueTick } from "@/lib/job-queue";
 import { useNormalizedJobStorage } from "@/lib/normalized-job-config";
-import { startNormalizedJob } from "@/lib/queue/job-queue-repo";
+import { startNormalizedJob, unpauseNormalizedJobNow } from "@/lib/queue/job-queue-repo";
 import { requireDistributorSession } from "@/lib/session";
 
 function publicJob(job: StoredJob) {
@@ -45,12 +45,22 @@ export async function POST(request: Request, { params }: Params) {
       if (!ok) {
         return NextResponse.json({ error: "Could not queue job — only draft jobs can be started this way." }, { status: 400 });
       }
+    } else if (job.status === "queued" || job.status === "paused") {
+      const ok = await unpauseNormalizedJobNow(jobId, session.address.toLowerCase());
+      if (!ok) {
+        return NextResponse.json(
+          {
+            error:
+              "Could not start job. It must be queued or paused, belong to your account, and still have pending or in-flight wallet rows.",
+          },
+          { status: 400 },
+        );
+      }
     } else {
-      job.paused = false;
-      job.status = "queued";
-      job.queuedAt = new Date().toISOString();
-      job.scheduledAt = undefined;
-      await saveJob(job);
+      return NextResponse.json(
+        { error: "Only draft, queued, or paused jobs can use Start / Run now for the normalized queue." },
+        { status: 400 },
+      );
     }
   } else {
     job.paused = false;

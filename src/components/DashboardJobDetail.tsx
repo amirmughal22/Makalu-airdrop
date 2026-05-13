@@ -124,9 +124,6 @@ export default function DashboardJobDetail() {
   const [walletSearch, setWalletSearch] = useState("");
   const [walletSearchDebounced, setWalletSearchDebounced] = useState("");
   const [resultPage, setResultPage] = useState(1);
-  const [rerunLoop, setRerunLoop] = useState(false);
-  const rerunLoopRef = useRef(false);
-  rerunLoopRef.current = rerunLoop;
   const aliveRef = useRef(true);
   const legacyResultsRef = useRef(false);
   /** Why the DB queue may not claim rows (from API). */
@@ -252,52 +249,6 @@ export default function DashboardJobDetail() {
     setWalletPage(1);
   }, [walletStatusFilter, walletSearchDebounced]);
 
-  const rerunEntireJob = useCallback(async () => {
-    const terminal = new Set(["completed", "failed", "cancelled"]);
-    setBusy(true);
-    setError("");
-    try {
-      const postRerun = async () => {
-        await parseApiJson(
-          await fetch(`/api/airdrop/jobs/${jobId}/rerun`, { method: "POST", headers: authHeaders() }),
-          "Failed to rerun job",
-        );
-        await loadJob({ silent: true });
-        await loadWallets();
-      };
-
-      await postRerun();
-
-      while (rerunLoopRef.current && aliveRef.current) {
-        let reachedTerminalForLoop = false;
-        for (;;) {
-          if (!rerunLoopRef.current || !aliveRef.current) break;
-          const gr = await fetch(`/api/airdrop/jobs/${jobId}`, { headers: authHeaders() });
-          if (gr.ok) {
-            const body = (await gr.json()) as { job?: BatchJob };
-            const j = body.job;
-            if (j) {
-              const st = String(j.status).toLowerCase();
-              if (terminal.has(st)) {
-                reachedTerminalForLoop = true;
-                break;
-              }
-              if (st === "paused") break;
-            }
-          }
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-        if (!rerunLoopRef.current || !aliveRef.current) break;
-        if (!reachedTerminalForLoop) break;
-        await postRerun();
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Rerun failed");
-    } finally {
-      setBusy(false);
-    }
-  }, [jobId, authHeaders, loadJob, loadWallets]);
-
   async function retryFailedRecipients() {
     if (!jobId || !sessionToken) return;
     setBusy(true);
@@ -383,14 +334,10 @@ export default function DashboardJobDetail() {
 
   const jobSt = job ? String(job.status).toLowerCase() : "";
   const isCancelled = jobSt === "cancelled";
-  const canRerunFromTerminal = ["completed", "failed"].includes(jobSt);
-  const canToggleRerunLoop =
-    canRerunFromTerminal || (["running", "queued", "paused"].includes(jobSt) && rerunLoop);
   const failedRecipientCount =
     stats?.failedWallets ?? job?.results.filter((r) => r.status === "failed").length ?? 0;
   const showCancelInHistory = jobSt === "queued" || jobSt === "running";
   const showStop = jobSt === "running" || jobSt === "queued";
-  const showResume = jobSt === "paused";
 
   if (!sessionToken) {
     return (
@@ -484,14 +431,19 @@ export default function DashboardJobDetail() {
                     Run now
                   </Button>
                 ) : null}
+                {(jobSt === "queued" || jobSt === "paused") && !isCancelled ? (
+                  <Button
+                    type="button"
+                    variant="default"
+                    disabled={busy}
+                    onClick={() => void post(`/api/airdrop/jobs/${jobId}/start`, "Failed to start job")}
+                  >
+                    Start now
+                  </Button>
+                ) : null}
                 {showStop ? (
                   <Button type="button" variant="default" disabled={busy} onClick={() => void post(`/api/airdrop/jobs/${jobId}/pause`, "Failed to pause")}>
                     Stop
-                  </Button>
-                ) : null}
-                {showResume ? (
-                  <Button type="button" variant="default" disabled={busy} onClick={() => void post(`/api/airdrop/jobs/${jobId}/resume`, "Failed to resume")}>
-                    Resume
                   </Button>
                 ) : null}
                 {showCancelInHistory ? (
@@ -505,69 +457,6 @@ export default function DashboardJobDetail() {
                     <Ban className="mr-2 h-4 w-4" />
                     Cancel job
                   </Button>
-                ) : null}
-                {!isCancelled && (jobSt === "running" || jobSt === "queued" || jobSt === "paused") ? (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={async () => {
-                      setBusy(true);
-                      setError("");
-                      try {
-                        const head = await fetch(`/api/airdrop/jobs/${jobId}`, { headers: authHeaders() });
-                        const { job: current } = await parseApiJson<{ job: BatchJob }>(head, "Failed to load job");
-                        const st = String(current.status).toLowerCase();
-                        if (st === "running" || st === "queued") {
-                          await parseApiJson(
-                            await fetch(`/api/airdrop/jobs/${jobId}/pause`, { method: "POST", headers: authHeaders() }),
-                            "Failed to stop job",
-                          );
-                          for (let i = 0; i < 40; i++) {
-                            await new Promise((r) => setTimeout(r, 500));
-                            const gr = await fetch(`/api/airdrop/jobs/${jobId}`, { headers: authHeaders() });
-                            const { job: j1 } = await parseApiJson<{ job: BatchJob }>(gr, "Failed to load job");
-                            const s1 = String(j1.status).toLowerCase();
-                            if (s1 === "paused" || s1 === "completed" || s1 === "failed" || s1 === "cancelled") break;
-                          }
-                        }
-                        await parseApiJson(
-                          await fetch(`/api/airdrop/jobs/${jobId}/rerun`, { method: "POST", headers: authHeaders() }),
-                          "Failed to restart job",
-                        );
-                        await loadJob({ silent: true });
-                      } catch (e) {
-                        setError(e instanceof Error ? e.message : "Restart failed");
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                  >
-                    Restart
-                  </Button>
-                ) : null}
-                {!isCancelled ? (
-                  <Button type="button" variant="default" disabled={busy || !canRerunFromTerminal} onClick={() => void rerunEntireJob()}>
-                    Rerun job
-                  </Button>
-                ) : null}
-                {!isCancelled ? (
-                  <label
-                    className={cn(
-                      "flex cursor-pointer items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400",
-                      canToggleRerunLoop ? "" : "cursor-not-allowed opacity-50",
-                    )}
-                    title="When checked, after this job fully finishes (completed / failed), rerun starts again automatically until you uncheck."
-                  >
-                    <input
-                      type="checkbox"
-                      className="h-3.5 w-3.5 rounded border-slate-400 accent-slate-900 dark:accent-slate-100"
-                      checked={rerunLoop}
-                      onChange={(e) => setRerunLoop(e.target.checked)}
-                      disabled={!canToggleRerunLoop || isCancelled}
-                    />
-                    Loop
-                  </label>
                 ) : null}
                 <Button
                   type="button"
