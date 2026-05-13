@@ -2,7 +2,9 @@
  * Read-only queue / Postgres diagnostics for stuck normalized jobs.
  *
  *   npm run queue:diagnose
- *   node --env-file=.env scripts/diagnose-stuck-queue.mjs
+ *   node scripts/diagnose-stuck-queue.mjs
+ *
+ * Loads `.env` from the repo root when present (no `node --env-file=.env` required).
  *
  * Schema note: this app uses `assigned_worker`, `updated_at`, `retry_count`, `error_message`
  * (not claimed_by / claimed_at / attempt_count / error). `queue_worker_heartbeats.last_heartbeat`
@@ -11,10 +13,12 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 import pg from "pg";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
+dotenv.config({ path: join(root, ".env") });
 const require = createRequire(import.meta.url);
 require(join(root, "database-url.js")).ensureDatabaseUrl();
 

@@ -10,10 +10,12 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 import pg from "pg";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
+dotenv.config({ path: join(root, ".env") });
 const require = createRequire(import.meta.url);
 require(join(root, "database-url.js")).ensureDatabaseUrl();
 
