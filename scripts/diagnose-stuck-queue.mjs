@@ -126,6 +126,20 @@ async function main() {
     `);
     console.log(JSON.stringify(claimable.rows, null, 2));
 
+    section("5b) Worker heartbeat freshness (are queue processes still alive?)");
+    const hbAge = await pool.query(`
+      SELECT
+        COUNT(*)::text AS registered_workers,
+        MAX(last_heartbeat) AS freshest_heartbeat,
+        MIN(last_heartbeat) AS oldest_heartbeat,
+        COUNT(*) FILTER (WHERE last_heartbeat < NOW() - INTERVAL '15 minutes')::text AS workers_stale_over_15m
+      FROM queue_worker_heartbeats
+    `);
+    console.log(JSON.stringify(hbAge.rows[0], null, 2));
+    console.log(
+      "Hint: if freshest_heartbeat is older than ~2–5 minutes while claimable_pending is large, PM2 / worker containers likely stopped — repair-stuck will not help (no stale processing rows).\n",
+    );
+
     section("6) Worker heartbeats");
     const hb = await pool.query(`
       SELECT *
@@ -135,11 +149,32 @@ async function main() {
     `);
     console.log(JSON.stringify(hb.rows, null, 2));
 
-    section("7) pg_stat_activity (this database)");
+    section("7) pg_stat_activity — hides idle backends whose only last query was ROLLBACK");
+    const noise = await pool.query(`
+      SELECT COUNT(*)::text AS c
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND pid <> pg_backend_pid()
+        AND state = 'idle'
+        AND query = 'ROLLBACK'
+    `);
+    const noiseN = Number(noise.rows[0]?.c ?? 0);
+    console.log(
+      JSON.stringify(
+        {
+          excluded_idle_rollback_backends: noiseN,
+          note: "PostgreSQL stores the last executed command per session. ROLLBACK is normal after aborted transactions (e.g. claim unique-index races, deadlock retry) or pool releasing a bad txn — not evidence of rows stuck in rollback.",
+        },
+        null,
+        2,
+      ),
+    );
     const act = await pool.query(`
       SELECT pid, state, wait_event_type, wait_event, query_start, LEFT(query, 300) AS query
       FROM pg_stat_activity
       WHERE datname = current_database()
+        AND pid <> pg_backend_pid()
+        AND NOT (state = 'idle' AND query = 'ROLLBACK')
       ORDER BY query_start DESC NULLS LAST
       LIMIT 50
     `);
