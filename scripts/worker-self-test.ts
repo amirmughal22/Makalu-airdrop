@@ -51,9 +51,9 @@ void (async () => {
   try {
     const pool = await (await import("../src/lib/postgres")).getPostgresPool();
     await pool.query("SELECT 1 AS ok");
-    rows.push(row("MySQL ping", true, "SELECT 1"));
+    rows.push(row("Postgres ping", true, "SELECT 1"));
   } catch (e) {
-    rows.push(row("MySQL ping", false, e instanceof Error ? e.message : String(e)));
+    rows.push(row("Postgres ping", false, e instanceof Error ? e.message : String(e)));
   }
 
   let dryIds: number[] = [];

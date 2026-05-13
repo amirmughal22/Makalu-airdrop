@@ -150,7 +150,7 @@ void (async () => {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   console.log(
-    `[airdrop-queue-worker] started workerId=${workerId} poll ~${queueWorkerPollMs()}ms batch ≤${queueClaimBatchSize()} · set AIRDROP_QUEUE_RUNTIME_DIAG=1 for per-claim SQL logs`,
+    `[airdrop-queue-worker] started workerId=${workerId} NODE_APP_INSTANCE=${process.env.NODE_APP_INSTANCE ?? "(unset)"} poll ~${queueWorkerPollMs()}ms batch ≤${queueClaimBatchSize()} · set AIRDROP_QUEUE_RUNTIME_DIAG=1 for per-claim SQL logs`,
   );
 
   await runAirdropQueueWorker(abort.signal, {

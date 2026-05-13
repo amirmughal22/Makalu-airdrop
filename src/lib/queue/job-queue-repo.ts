@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { assertSignerCountWithinJobLimit } from "../airdrop-signer-limits";
+import { safeRollbackPgClient } from "../postgres-rollback";
 import { getPostgresPool, pgExecute, pgQuery } from "../postgres";
 import { MAX_JOB_TARGET_RUNS } from "../job-types";
 import type { RecipientInput } from "../job-types";
@@ -718,7 +719,19 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
     } catch (e) {
       const code = e && typeof e === "object" && "code" in e ? String((e as { code: string }).code) : "";
       if (code === "23505") {
-        await conn.query("ROLLBACK");
+        await safeRollbackPgClient(
+          conn,
+          `claimWalletBatch:23505_unique_processing_per_signer worker=${workerId.slice(0, 48)}`,
+        );
+        console.error(
+          JSON.stringify({
+            event: "claim_wallet_batch_rollback",
+            code: "23505",
+            workerId: workerId.slice(0, 64),
+            selectedIds: ids.slice(0, 24),
+            message: "Concurrent claim hit partial unique index idx_job_wallets_one_processing_per_signer",
+          }),
+        );
         if (diag) console.warn("[claim-diag] unique idx_job_wallets_one_processing_per_signer — concurrent claim; retrying later");
         return [];
       }
@@ -764,7 +777,11 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
       chainId: r.chainId != null ? Number(r.chainId) : null,
     }));
   } catch (e) {
-    await conn.query("ROLLBACK");
+    await safeRollbackPgClient(
+      conn,
+      `claimWalletBatch:outer_catch ${e instanceof Error ? e.message : String(e)}`,
+    );
+    console.error("[claim-wallet] transaction aborted", e instanceof Error ? e.stack ?? e.message : e);
     throw e;
   } finally {
     conn.release();
@@ -809,7 +826,7 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
        FOR UPDATE OF jw SKIP LOCKED`;
     const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, batch]);
     if (!rows.length) {
-      await conn.query("ROLLBACK");
+      await conn.query("COMMIT");
       return [];
     }
     const ids = rows.map((r) => Number(r.id));
@@ -833,10 +850,10 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
         [jid],
       );
     }
-    await conn.query("ROLLBACK");
+    await safeRollbackPgClient(conn, "claimWalletBatchDryRun:intentional_rollback_after_update_simulation");
     return ids;
   } catch (e) {
-    await conn.query("ROLLBACK");
+    await safeRollbackPgClient(conn, `claimWalletBatchDryRun:catch ${e instanceof Error ? e.message : String(e)}`);
     throw e;
   } finally {
     conn.release();

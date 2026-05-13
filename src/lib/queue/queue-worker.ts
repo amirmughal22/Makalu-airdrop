@@ -97,11 +97,40 @@ export async function runAirdropQueueWorker(
   let cumulativeFail = 0;
   let lastBatchFailRatio = 0;
   let lastIdleDiagMs = 0;
+  let lastClaimZeroLogMs = 0;
+  const CLAIM_ZERO_LOG_MS = 30_000;
+  const verboseLoop =
+    process.env.AIRDROP_QUEUE_WORKER_DEBUG?.trim() === "1" ||
+    process.env.AIRDROP_QUEUE_WORKER_DEBUG?.trim()?.toLowerCase() === "true";
+
   const idleDiag =
     process.env.AIRDROP_QUEUE_WORKER_DEBUG?.trim() === "1" ||
     process.env.AIRDROP_QUEUE_WORKER_DEBUG?.trim()?.toLowerCase() === "true";
 
+  async function pulseHeartbeat(lastBatchSize: number): Promise<void> {
+    try {
+      await upsertWorkerHeartbeat({
+        workerId,
+        iterations: iteration,
+        rowsOk: cumulativeOk,
+        rowsFail: cumulativeFail,
+        lastBatchSize,
+        activeJobId: null,
+      });
+    } catch (e) {
+      console.error("[queue-worker] heartbeat upsert failed", e instanceof Error ? e.stack ?? e.message : e);
+    }
+  }
+
   initWorkerLivenessClock();
+  console.info(
+    JSON.stringify({
+      event: "queue_worker_started",
+      workerId: workerId.slice(0, 64),
+      pollMs: queueWorkerPollMs(),
+      verboseLoop,
+    }),
+  );
   fileLog?.log("info", "queue_worker_start", { workerId });
   const runtimeCheckEvery = 15;
   const idleExitPolls = parseInt(process.env.AIRDROP_QUEUE_WORKER_IDLE_EXIT_AFTER_POLLS?.trim() ?? "", 10);
@@ -117,6 +146,9 @@ export async function runAirdropQueueWorker(
 
   while (!signal?.aborted) {
     iteration++;
+    if (verboseLoop || iteration === 1 || iteration % 25 === 0) {
+      console.info(JSON.stringify({ event: "queue_worker_loop_tick", iteration, workerId: workerId.slice(0, 64) }));
+    }
     try {
       const n = await reconcileStaleProcessingRows();
       if (n > 0) {
@@ -134,10 +166,14 @@ export async function runAirdropQueueWorker(
 
     let batch: ClaimedWalletRow[] = [];
     const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (verboseLoop) {
+      console.info(JSON.stringify({ event: "queue_worker_before_claim", iteration, workerId: workerId.slice(0, 64) }));
+    }
     try {
       batch = await claimWalletBatch(workerId);
     } catch (e) {
-      console.error("[queue-worker] claim failed", e);
+      console.error("[queue-worker] claim exception", e instanceof Error ? e.stack ?? e.message : e);
+      await pulseHeartbeat(0);
       await sleep(queueWorkerPollMs());
       continue;
     }
@@ -150,12 +186,30 @@ export async function runAirdropQueueWorker(
       runtimeRefreshSequence: meta.refreshSequence,
     });
 
+    console.info(
+      JSON.stringify({
+        event: "queue_worker_claim_result",
+        iteration,
+        workerId: workerId.slice(0, 64),
+        claimed: batch.length,
+        claimLatencyMs: Math.round(claimLatencyMs),
+      }),
+    );
+
     if (!batch.length) {
       if (iteration % runtimeCheckEvery === 0) {
         await refreshQueueRuntimeCache();
         const blockers = collectQueueClaimBlockers();
         if (blockers.length > 0) {
           const msg = blockers.join(" | ");
+          console.error(
+            JSON.stringify({
+              event: "queue_worker_fatal_exit",
+              reason: "runtime_queue_blocked",
+              blockers,
+              workerId: workerId.slice(0, 64),
+            }),
+          );
           console.error("[queue-worker] Runtime queue block — exiting:", msg);
           fileLog?.log("error", "runtime_queue_blocked", { blockers });
           process.exit(1);
@@ -164,10 +218,48 @@ export async function runAirdropQueueWorker(
 
       if (Number.isFinite(idleExitPolls) && idleExitPolls > 0 && getConsecutiveEmptyPolls() >= idleExitPolls) {
         console.warn(
+          JSON.stringify({
+            event: "queue_worker_fatal_exit",
+            reason: "idle_exit_threshold",
+            polls: idleExitPolls,
+            workerId: workerId.slice(0, 64),
+          }),
+        );
+        console.warn(
           `[queue-worker] Exiting after ${idleExitPolls} empty polls (AIRDROP_QUEUE_WORKER_IDLE_EXIT_AFTER_POLLS).`,
         );
         fileLog?.log("warn", "idle_exit_threshold", { polls: idleExitPolls });
         process.exit(0);
+      }
+
+      const nowMs = Date.now();
+      if (nowMs - lastClaimZeroLogMs >= CLAIM_ZERO_LOG_MS) {
+        lastClaimZeroLogMs = nowMs;
+        const blockers = collectQueueClaimBlockers();
+        let extra: Record<string, unknown> = {};
+        try {
+          await refreshQueueRuntimeCache();
+          const d = await getQueueClaimDiagnostics();
+          extra = {
+            matchingClaimSql: d.matchingClaimSql,
+            pendingBlockedByJobState: d.pendingBlockedByJobState,
+            pendingBackoffFuture: d.pendingBackoffFuture,
+            pendingRetryCap: d.pendingRetryCap,
+            pendingButDraftJob: d.pendingButDraftJob,
+          };
+        } catch (err) {
+          extra = { diagnosticsError: err instanceof Error ? err.message : String(err) };
+        }
+        console.warn(
+          JSON.stringify({
+            event: "queue_worker_claim_zero",
+            iteration,
+            workerId: workerId.slice(0, 64),
+            blockers: blockers.length ? blockers : ["none"],
+            consecutiveEmptyPolls: getConsecutiveEmptyPolls(),
+            ...extra,
+          }),
+        );
       }
 
       if (idleDiag && Date.now() - lastIdleDiagMs > 90_000) {
@@ -204,6 +296,7 @@ export async function runAirdropQueueWorker(
           /* ignore */
         }
       }
+      await pulseHeartbeat(0);
       await sleep(queueWorkerPollMs());
       continue;
     }
@@ -271,8 +364,8 @@ export async function runAirdropQueueWorker(
         lastBatchSize: batch.length,
         activeJobId,
       });
-    } catch {
-      /* heartbeat must not kill worker */
+    } catch (e) {
+      console.error("[queue-worker] heartbeat upsert failed after batch", e instanceof Error ? e.stack ?? e.message : e);
     }
     try {
       const jr = await reconcileAllJobStatusesFromWallets();
