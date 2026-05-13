@@ -33,6 +33,7 @@
     "queue:worker-self-test": "node ./node_modules/tsx/dist/cli.mjs scripts/queue-worker-self-test.ts",
     "queue:debug-one-job": "node scripts/debug-one-job-claim.mjs",
     "test-queue-claim-sql": "node scripts/test-queue-claim-sql.mjs",
+    "test:claim-query": "node scripts/test-claim-query.mjs",
     "bench:pending-count": "node --env-file=.env scripts/benchmark-pending-count.mjs",
     "bench:queue-claim": "node --env-file=.env scripts/bench-queue-claim.mjs"
   },

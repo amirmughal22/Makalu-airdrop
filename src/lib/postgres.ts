@@ -24,11 +24,26 @@ export function toPgText(sql: string, paramCount: number): string {
   return text;
 }
 
+/**
+ * PostgreSQL rejects `SELECT DISTINCT ... FOR UPDATE` at the same query level.
+ * Call on the **full** SQL string before execution; allows `SELECT cols FROM (SELECT DISTINCT ...) x … FOR UPDATE`.
+ */
+export function assertPgSelectNoRootDistinctWithForUpdate(sql: string): void {
+  const trimmed = sql.trimStart();
+  if (!/\bFOR\s+UPDATE\b/i.test(sql)) return;
+  if (/^\s*SELECT\s+DISTINCT\b/im.test(trimmed)) {
+    throw new Error(
+      "[pg] Root SELECT DISTINCT … FOR UPDATE is invalid in PostgreSQL; use a subquery for DISTINCT then lock rows in an outer SELECT.",
+    );
+  }
+}
+
 export async function pgQuery<T extends QueryResultRow>(
   executor: Pick<Pool, "query"> | Pick<PoolClient, "query">,
   sql: string,
   params: unknown[] = [],
 ): Promise<T[]> {
+  assertPgSelectNoRootDistinctWithForUpdate(sql);
   const { rows } = await executor.query<T>(toPgText(sql, params.length), params);
   return rows;
 }
@@ -38,6 +53,7 @@ export async function pgExecute(
   sql: string,
   params: unknown[] = [],
 ): Promise<{ rowCount: number }> {
+  assertPgSelectNoRootDistinctWithForUpdate(sql);
   const res = await executor.query(toPgText(sql, params.length), params);
   return { rowCount: res.rowCount ?? 0 };
 }

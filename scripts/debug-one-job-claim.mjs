@@ -82,10 +82,13 @@ ORDER BY lower(trim(${ES_JW_J})), md5(jw.job_id::text || ':' || jw.id::text), j.
 const CANDIDATE_SQL = `${CANDIDATE_BODY}
 LIMIT 20`;
 
-/** Same clause order as production {@link claimWalletBatch}: FOR UPDATE before LIMIT. */
-const FORCE_ONE_SELECT_SQL = `${CANDIDATE_BODY}
-FOR UPDATE OF jw SKIP LOCKED
-LIMIT 1`;
+/** Two-stage lock: DISTINCT only inside subquery (PostgreSQL forbids DISTINCT + FOR UPDATE on same SELECT). */
+const FORCE_ONE_SELECT_SQL = `SELECT picked.id AS id
+FROM (${CANDIDATE_BODY}
+LIMIT 1) picked
+INNER JOIN job_wallets jw ON jw.id = picked.id
+INNER JOIN jobs j ON j.id = jw.job_id
+FOR UPDATE OF jw SKIP LOCKED`;
 
 async function explainBlockers(pool, jid) {
   const checklist = {

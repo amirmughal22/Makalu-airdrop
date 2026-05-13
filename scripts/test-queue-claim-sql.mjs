@@ -44,23 +44,28 @@ const maxAttempts = maxRetries + 1;
 const CLAIM_JOB_ELIGIBLE_WHERE = `(j.paused IS NOT TRUE AND j.status IN ('queued', 'running', 'processing'))`;
 const CLAIM_WALLET_ORDER_BY_JW_J = `md5(jw.job_id::text || ':' || jw.id::text), j.queued_at ASC NULLS LAST, j.id, jw.id`;
 
-const CLAIM_SQL = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
-   jw.id AS id, jw.job_id AS "jobId"
-   FROM job_wallets jw
+const CLAIM_SQL = `SELECT picked.id AS id, picked."jobId" AS "jobId"
+   FROM (
+     SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
+       jw.id AS id, jw.job_id AS "jobId"
+     FROM job_wallets jw
+     INNER JOIN jobs j ON j.id = jw.job_id
+     WHERE jw.status = 'pending'
+       AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
+       AND jw.retry_count < $1
+       AND (${CLAIM_JOB_ELIGIBLE_WHERE})
+       AND (${CLAIM_ES_JW_J}) IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM job_wallets px
+         INNER JOIN jobs jp ON jp.id = px.job_id
+         WHERE px.status = 'processing'
+           AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
+       )
+     ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
+     LIMIT $2
+   ) picked
+   INNER JOIN job_wallets jw ON jw.id = picked.id
    INNER JOIN jobs j ON j.id = jw.job_id
-   WHERE jw.status = 'pending'
-     AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
-     AND jw.retry_count < $1
-     AND (${CLAIM_JOB_ELIGIBLE_WHERE})
-     AND (${CLAIM_ES_JW_J}) IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM job_wallets px
-       INNER JOIN jobs jp ON jp.id = px.job_id
-       WHERE px.status = 'processing'
-         AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
-     )
-   ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
-   LIMIT $2
    FOR UPDATE OF jw SKIP LOCKED`;
 
 async function main() {

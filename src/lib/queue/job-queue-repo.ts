@@ -609,10 +609,11 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
       console.info(`[claim-diag] tx_begin_ms=${Math.round(performance.now() - txT0)} isolation=${iso ?? "?"}`);
     }
     /**
-     * Fair claim: one SELECT on `job_wallets` + `jobs`, DISTINCT ON (signer), `FOR UPDATE OF jw SKIP LOCKED`
-     * on wallet rows only (no window-function CTE that would skip row-level locks).
+     * Two-stage claim: PostgreSQL forbids `SELECT DISTINCT … FOR UPDATE` on the same SELECT.
+     * Stage A — candidates inside a subquery (DISTINCT ON signer, no lock).
+     * Stage B — lock real `job_wallets` rows with `FOR UPDATE OF jw SKIP LOCKED`.
      */
-    const sql = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
+    const claimPickSub = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
        jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
               jw.retry_count AS "retryCount", (${CLAIM_ES_JW_J}) AS "signerAddress",
               j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
@@ -630,7 +631,13 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
              AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
        ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
-       LIMIT ?
+       LIMIT ?`;
+    const sql = `SELECT picked.id AS id, picked."jobId" AS "jobId", picked."walletAddress" AS "walletAddress",
+       picked.amount AS amount, picked."retryCount" AS "retryCount", picked."signerAddress" AS "signerAddress",
+       picked.owner AS owner, picked.mode AS mode, picked."tokenAddress" AS "tokenAddress", picked."chainId" AS "chainId"
+       FROM (${claimPickSub}) picked
+       INNER JOIN job_wallets jw ON jw.id = picked.id
+       INNER JOIN jobs j ON j.id = jw.job_id
        FOR UPDATE OF jw SKIP LOCKED`;
     if (diag) console.info("[claim-diag] claim_sql=", sql.replace(/\s+/g, " ").slice(0, 220) + "…");
 
@@ -804,7 +811,7 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
   const conn = await pool.connect();
   try {
     await conn.query("BEGIN");
-    const sql = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
+    const claimPickSub = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
        jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
               jw.retry_count AS "retryCount", (${CLAIM_ES_JW_J}) AS "signerAddress",
               j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
@@ -822,7 +829,13 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
              AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
        ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
-       LIMIT ?
+       LIMIT ?`;
+    const sql = `SELECT picked.id AS id, picked."jobId" AS "jobId", picked."walletAddress" AS "walletAddress",
+       picked.amount AS amount, picked."retryCount" AS "retryCount", picked."signerAddress" AS "signerAddress",
+       picked.owner AS owner, picked.mode AS mode, picked."tokenAddress" AS "tokenAddress", picked."chainId" AS "chainId"
+       FROM (${claimPickSub}) picked
+       INNER JOIN job_wallets jw ON jw.id = picked.id
+       INNER JOIN jobs j ON j.id = jw.job_id
        FOR UPDATE OF jw SKIP LOCKED`;
     const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, batch]);
     if (!rows.length) {
@@ -1018,7 +1031,7 @@ export async function reconcileStaleProcessingRows(): Promise<number> {
          assigned_worker = NULL,
          next_attempt_at = NULL,
          error_message = LEFT(
-           COALESCE(error_message, '') || ' | stale processing reset (was worker ' || COALESCE(assigned_worker, '?') || ')',
+           COALESCE(error_message, '') || ' | stale processing reset (was worker ' || COALESCE(assigned_worker, CHR(63)) || ')',
            8000
          ),
          updated_at = NOW()
