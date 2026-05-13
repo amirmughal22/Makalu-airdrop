@@ -1,6 +1,6 @@
 # Coolify queue throughput settings
 
-Safe **production starter** preset for the normalized PostgreSQL queue (`FOR UPDATE SKIP LOCKED`, optional Redis for runtime-flag cache).
+Safe **production starter** preset for the normalized PostgreSQL queue (`FOR UPDATE SKIP LOCKED`, optional Redis for runtime-flag cache and **cross-process** send rate limits).
 
 ## Why `npm run worker:queue` only runs one worker
 
@@ -13,29 +13,50 @@ That script starts **exactly one** Node.js process. To run **20–30** workers y
 
 Do not start 30× `npm run worker:queue` in one terminal without an orchestrator — you still only get one unless you open 30 shells or use PM2 / replicas.
 
-## Recommended starter env (Coolify)
+## Recommended high-throughput preset (~1000 tx/min, 100 signers)
 
-Set these on the **queue worker** service (and align the **web** app where noted):
+Use when you run **~100 distributor wallets** in round-robin on one chain and want about **1000 successful sends/minute** under the default **per-signer** and **global** caps.
+
+Set on **each queue worker** process (and align **web** where noted):
+
+| Variable | Value | Notes |
+|----------|-------|--------|
+| `PM2_QUEUE_INSTANCES` | `20` | Or 20 Coolify replicas; each process = one worker loop. |
+| `AIRDROP_QUEUE_BATCH_SIZE` | `96` | Rows per claim (max 500); one pending row per distinct signer per claim. |
+| `AIRDROP_MAX_PARALLEL_TXS` | `10` | Dashboard / DB `max_parallel_txs` up to **100**; cap simultaneous **different** signers per wave. |
+| `AIRDROP_DB_CONNECTION_LIMIT` | `2` | **Per process** — 20 workers × 2 = 40 pool slots; raise Postgres `max_connections` if needed. |
+| `AIRDROP_SIGNER_TXS_PER_MINUTE` | `10` | Soft cap per signer address (Redis preferred; PG fallback). |
+| `AIRDROP_GLOBAL_TXS_PER_MINUTE` | `1000` | Cluster-wide cap (requires **REDIS_URL** for strict multi-process accuracy). |
+| `REDIS_URL` | `redis://…` | Recommended whenever multiple workers share rate limits. |
+| `AIRDROP_EMBEDDED_QUEUE_WORKER` | `false` | On **web** when dedicated `worker:queue` replicas send. |
+
+Also set `AIRDROP_QUEUE_V2=true`, `DATABASE_URL`, and a **unique** `AIRDROP_WORKER_ID` per worker replica.
+
+**Normalized jobs** support up to **100** distributor addresses per job; recipients are assigned **evenly** in round-robin order. **Nonce safety:** at most one `processing` row per signer at a time (partial unique index + claim SQL). **Rate limits** apply immediately before each send (see `src/lib/queue/tx-rate-limiter.ts`).
+
+## Recommended starter env (Coolify)
 
 | Variable | Value | Notes |
 |----------|-------|--------|
 | `AIRDROP_QUEUE_BATCH_SIZE` | `48` | Wallets claimed per claim transaction (code max 500). |
 | `AIRDROP_QUEUE_WORKER_POLL_MS` | `500` | Delay when a poll finds nothing to claim. |
-| `AIRDROP_MAX_PARALLEL_TXS` | `6` | Fallback when DB `queue_runtime_settings` is missing; prefer DB + SQL below. |
+| `AIRDROP_MAX_PARALLEL_TXS` | `6` | Fallback when DB `queue_runtime_settings` is missing; prefer DB + Dashboard. |
 | `AIRDROP_DB_CONNECTION_LIMIT` | `8` | **Per Node process** — see pool warning below. |
 | `AIRDROP_EMBEDDED_QUEUE_WORKER` | `false` | Set on the **web** app when dedicated `worker:queue` replicas handle claims (recommended). |
-
-Also set `AIRDROP_QUEUE_V2=true`, `DATABASE_URL`, and a **unique** `AIRDROP_WORKER_ID` per worker replica (see warnings).
 
 ## Align DB parallel cap with env
 
 If `queue_runtime_settings` row `id = 1` still has a lower `max_parallel_txs`, raise it once:
 
 ```sql
-UPDATE queue_runtime_settings SET max_parallel_txs = 6 WHERE id = 1;
+UPDATE queue_runtime_settings SET max_parallel_txs = 10 WHERE id = 1;
 ```
 
-The Dashboard “Queue worker” UI can set the same field; env `AIRDROP_MAX_PARALLEL_TXS` applies when the row is absent or as a documented fallback—**effective parallel** is still bounded by distinct signers per batch (nonce safety).
+The Dashboard “Queue worker” UI can set the same field (1–100); env `AIRDROP_MAX_PARALLEL_TXS` applies when the row is absent. **Effective parallel** per wave is still bounded by **distinct signers** in the claimed batch (nonce safety).
+
+## Dashboard throughput
+
+Queue worker → **Throughput metrics** shows active signers (pending/processing), completed tx/min (1- and 5-minute windows), failed tx/min, env caps, and **estimated_tx_per_min = active_signers × AIRDROP_SIGNER_TXS_PER_MINUTE**. A warning appears when that estimate is below `AIRDROP_TARGET_TX_PER_MINUTE` (defaults to `AIRDROP_GLOBAL_TXS_PER_MINUTE`) and at least one signer is active.
 
 ## Warnings (read before scaling)
 
@@ -53,6 +74,6 @@ Increase only after stable CPU, RPC latency, and Postgres connection count. Sing
 |------|----------------------------|---------------------------------|------|
 | **Safe** (starter) | 48 | 6 | Default production preset. |
 | **Medium** | 96 | 10 | Healthy RPC + DB; more headroom on `max_connections`. |
-| **Aggressive** | 128 | 16 | Proven stable at medium tier; still ≤ code caps (batch max 500, parallel max 20). |
+| **Aggressive** | 128 | 16–100 | Proven stable at medium tier; still ≤ code caps (batch max 500, parallel max 100). |
 
 Do not remove global pause, retries, heartbeats, or stale-processing recovery when tuning.

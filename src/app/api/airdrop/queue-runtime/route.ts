@@ -9,6 +9,13 @@ import {
   setQueueRuntimeFlagsPartial,
   type QueueRuntimeFlags,
 } from "@/lib/queue/queue-runtime-settings";
+import { getQueueThroughputMetrics } from "@/lib/queue/queue-throughput-metrics";
+import {
+  globalTxsPerMinuteLimit,
+  signerTxsPerMinuteLimit,
+  targetTxPerMinute,
+  txRateLimitingEnabled,
+} from "@/lib/queue/throughput-limits";
 import {
   embeddedQueueWorkerActiveLoopCount,
   embeddedQueueWorkerLoopRunning,
@@ -37,6 +44,22 @@ export async function GET(request: Request) {
   const { getQueueRuntimeFlagsSync } = await import("@/lib/queue/queue-runtime-settings");
   const syncFlags = getQueueRuntimeFlagsSync();
 
+  let metrics = null as Awaited<ReturnType<typeof getQueueThroughputMetrics>> | null;
+  try {
+    metrics = await getQueueThroughputMetrics();
+  } catch {
+    metrics = null;
+  }
+  const signerTxsPerMinute = signerTxsPerMinuteLimit();
+  const globalTxsPerMinute = globalTxsPerMinuteLimit();
+  const targetTxPerMin = targetTxPerMinute();
+  const activeSigners = metrics?.activeSigners ?? 0;
+  const estimatedTxPerMin = activeSigners * signerTxsPerMinute;
+  const throughputWarning =
+    activeSigners > 0 && estimatedTxPerMin < targetTxPerMin
+      ? `Estimated capacity (${estimatedTxPerMin}/min from ${activeSigners} active signer(s) × ${signerTxsPerMinute}/min) is below target ${targetTxPerMin}/min. Add signer wallets or raise AIRDROP_SIGNER_TXS_PER_MINUTE (and ensure AIRDROP_GLOBAL_TXS_PER_MINUTE fits).`
+      : null;
+
   return NextResponse.json({
     processingEnabled: syncFlags.processingEnabled,
     normalizedQueueV2: syncFlags.normalizedQueueV2,
@@ -57,6 +80,20 @@ export async function GET(request: Request) {
       process.env.AIRDROP_QUEUE_GLOBAL_PAUSED?.trim() === "1" ||
       process.env.AIRDROP_QUEUE_GLOBAL_PAUSED?.trim()?.toLowerCase() === "true",
     canToggle: canToggleQueueControl(session.address),
+    throughput: metrics
+      ? {
+          activeSigners: metrics.activeSigners,
+          txPerMinuteLast1: metrics.txPerMinute1,
+          txPerMinuteLast5Avg: metrics.txPerMinute5,
+          failedTxPerMinuteLast1: metrics.failedTxPerMinute1,
+          signerTxsPerMinute,
+          globalTxsPerMinute,
+          targetTxPerMinute: targetTxPerMin,
+          estimatedTxPerMin,
+          throughputWarning,
+          txRateLimitingEnabled: txRateLimitingEnabled(),
+        }
+      : null,
   });
 }
 
@@ -106,7 +143,6 @@ export async function PATCH(request: Request) {
 
   await refreshQueueRuntimeCache();
   const { getQueueRuntimeFlagsSync } = await import("@/lib/queue/queue-runtime-settings");
-  const before = getQueueRuntimeFlagsSync();
 
   const next = await setQueueRuntimeFlagsPartial(partial);
 

@@ -1,3 +1,4 @@
+import { assertSignerCountWithinJobLimit } from "@/lib/airdrop-signer-limits";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { isAddress } from "viem";
@@ -79,6 +80,11 @@ export async function POST(request: Request) {
     if (distributorAddresses.length === 0 || distributorAddresses.some((a) => !isAddress(a))) {
       return NextResponse.json({ error: "Select one or more valid distributor wallets." }, { status: 400 });
     }
+    try {
+      assertSignerCountWithinJobLimit(distributorAddresses);
+    } catch (e) {
+      return NextResponse.json({ error: e instanceof Error ? e.message : "Too many distributor wallets" }, { status: 400 });
+    }
     for (const a of distributorAddresses) {
       if (!ownerHasWallet(session.address, a)) {
         return NextResponse.json(
@@ -129,7 +135,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "Job rows were created but the job could not be queued (draft → queued). Inspect MySQL and run queue-admin recover-stalled-queue if needed.",
+            "Job rows were created but the job could not be queued (draft → queued). Inspect PostgreSQL and run queue-admin recover-stalled-queue if needed.",
         },
         { status: 500 },
       );

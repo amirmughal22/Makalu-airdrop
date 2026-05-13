@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { assertSignerCountWithinJobLimit } from "../airdrop-signer-limits";
 import { getPostgresPool, pgExecute, pgQuery } from "../postgres";
 import { MAX_JOB_TARGET_RUNS } from "../job-types";
 import type { RecipientInput } from "../job-types";
@@ -121,6 +122,7 @@ export type CreateNormalizedJobInput = {
   loopForever?: boolean;
 };
 
+/** Round-robin assigns recipients to signers so each signer gets within one row of floor(n/s) wallets. */
 function expandRecipientsForRuns(
   recipients: RecipientInput[],
   signerAddresses: string[],
@@ -131,6 +133,7 @@ function expandRecipientsForRuns(
     Number.isFinite(rawT) && rawT >= 1 ? Math.min(MAX_JOB_TARGET_RUNS, rawT) : 1;
   const distributors = [...new Set(signerAddresses.map((a) => a.toLowerCase()))];
   if (distributors.length === 0) throw new Error("No distributor wallets");
+  assertSignerCountWithinJobLimit(distributors);
 
   const expanded: Array<{ address: string; amount: string; signer: string }> = [];
   let rowIndex = 0;
@@ -292,6 +295,7 @@ export async function createNormalizedJobFromGeneratedBatch(input: CreateNormali
 
   const distributors = [...new Set(input.signerAddresses.map((a) => a.toLowerCase()))];
   if (!distributors.length) throw new Error("No distributor wallets");
+  assertSignerCountWithinJobLimit(distributors);
   const signersJson = JSON.stringify(distributors);
 
   const conn = await pool.connect();
@@ -566,7 +570,8 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
       const iso = await sessionIsolation(conn);
       console.info(`[claim-diag] tx_begin_ms=${Math.round(performance.now() - txT0)} isolation=${iso ?? "?"}`);
     }
-    const sql = `SELECT jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
+    const sql = `SELECT DISTINCT ON (lower(trim(jw.signer_address)))
+       jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
               jw.retry_count AS "retryCount", jw.signer_address AS "signerAddress",
               j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
        FROM job_wallets jw
@@ -576,9 +581,16 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
          AND jw.retry_count < ?
          AND j.status IN ('queued', 'running')
          AND NOT j.paused
-       ORDER BY jw.job_id, jw.id
+         AND jw.signer_address IS NOT NULL
+         AND length(trim(jw.signer_address)) > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM job_wallets px
+           WHERE px.status = 'processing'
+             AND lower(trim(px.signer_address)) = lower(trim(jw.signer_address))
+         )
+       ORDER BY lower(trim(jw.signer_address)), j.queued_at ASC NULLS LAST, j.id, jw.id
        LIMIT ?
-       FOR UPDATE SKIP LOCKED`;
+       FOR UPDATE OF jw SKIP LOCKED`;
     if (diag) console.info("[claim-diag] claim_sql=", sql.replace(/\s+/g, " ").slice(0, 220) + "…");
 
     const selT0 = performance.now();
@@ -609,11 +621,21 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
     const ids = rows.map((r) => Number(r.id));
     const ph = ids.map(() => "?").join(",");
     const updT0 = performance.now();
-    await pgExecute(
-      conn,
-      `UPDATE job_wallets SET status = 'processing', assigned_worker = ?, updated_at = NOW() WHERE id IN (${ph})`,
-      [workerId.slice(0, 64), ...ids],
-    );
+    try {
+      await pgExecute(
+        conn,
+        `UPDATE job_wallets SET status = 'processing', assigned_worker = ?, updated_at = NOW() WHERE id IN (${ph})`,
+        [workerId.slice(0, 64), ...ids],
+      );
+    } catch (e) {
+      const code = e && typeof e === "object" && "code" in e ? String((e as { code: string }).code) : "";
+      if (code === "23505") {
+        await conn.query("ROLLBACK");
+        if (diag) console.warn("[claim-diag] unique idx_job_wallets_one_processing_per_signer — concurrent claim; retrying later");
+        return [];
+      }
+      throw e;
+    }
     if (diag) console.info(`[claim-diag] update_processing_ms=${Math.round(performance.now() - updT0)} ids=${ids.length}`);
 
     const jobIds = [...new Set(rows.map((r) => String(r.jobId)))];
@@ -676,7 +698,8 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
   const conn = await pool.connect();
   try {
     await conn.query("BEGIN");
-    const sql = `SELECT jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
+    const sql = `SELECT DISTINCT ON (lower(trim(jw.signer_address)))
+       jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
               jw.retry_count AS "retryCount", jw.signer_address AS "signerAddress",
               j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
        FROM job_wallets jw
@@ -686,9 +709,16 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
          AND jw.retry_count < ?
          AND j.status IN ('queued', 'running')
          AND NOT j.paused
-       ORDER BY jw.job_id, jw.id
+         AND jw.signer_address IS NOT NULL
+         AND length(trim(jw.signer_address)) > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM job_wallets px
+           WHERE px.status = 'processing'
+             AND lower(trim(px.signer_address)) = lower(trim(jw.signer_address))
+         )
+       ORDER BY lower(trim(jw.signer_address)), j.queued_at ASC NULLS LAST, j.id, jw.id
        LIMIT ?
-       FOR UPDATE SKIP LOCKED`;
+       FOR UPDATE OF jw SKIP LOCKED`;
     const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, batch]);
     if (!rows.length) {
       await conn.query("ROLLBACK");

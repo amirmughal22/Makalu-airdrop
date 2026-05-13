@@ -73,3 +73,35 @@ export async function safeRedisDel(key: string): Promise<void> {
     /* ignore */
   }
 }
+
+/** Atomic INCR under max with TTL on first increment. Returns true if slot acquired. */
+export async function safeRedisIncrUnderLimit(key: string, max: number, ttlSec: number): Promise<boolean | null> {
+  const r = getRedis();
+  if (!r) return null;
+  try {
+    if (r.status !== "ready") await r.connect().catch(() => {});
+    const script = `
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+if n > tonumber(ARGV[1]) then
+  redis.call('DECR', KEYS[1])
+  return 0
+end
+return 1`;
+    const v = (await r.eval(script, 1, key, String(max), String(ttlSec))) as number;
+    return v === 1;
+  } catch {
+    return null;
+  }
+}
+
+export async function safeRedisDecr(key: string): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    if (r.status !== "ready") await r.connect().catch(() => {});
+    await r.decr(key).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+}

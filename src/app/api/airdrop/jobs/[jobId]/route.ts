@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { assertSignerCountWithinJobLimit } from "@/lib/airdrop-signer-limits";
 import { NextResponse } from "next/server";
 import { isAddress } from "viem";
 import { MAKALU_CHAIN_ID_DECIMAL } from "@/lib/chain";
@@ -133,6 +134,11 @@ export async function PATCH(request: Request, { params }: Params) {
       const nextList = [...new Set(raw.map((a) => String(a || "").trim().toLowerCase()).filter(Boolean))];
       if (nextList.length === 0 || nextList.some((a) => !isAddress(a))) {
         return NextResponse.json({ error: "Invalid distributor wallet selection." }, { status: 400 });
+      }
+      try {
+        assertSignerCountWithinJobLimit(nextList);
+      } catch (e) {
+        return NextResponse.json({ error: e instanceof Error ? e.message : "Too many distributor wallets" }, { status: 400 });
       }
       for (const a of nextList) {
         if (!ownerHasWallet(session.address, a)) {

@@ -8,6 +8,7 @@ import {
   recordWalletSuccess,
   reconcileStaleProcessingRows,
 } from "./job-queue-repo";
+import { acquireTxSendBudget } from "./tx-rate-limiter";
 import {
   queueAdaptiveParallelEnabled,
   queueWorkerId,
@@ -228,6 +229,10 @@ export async function runAirdropQueueWorker(
       }
       if (!wave.length) break;
       rr = (rr + 1) % signerQueues.length;
+
+      for (const row of wave) {
+        await acquireTxSendBudget(row.signerAddress!);
+      }
 
       const outcomes = await Promise.all(wave.map((row) => processClaimedWalletRow(row)));
       for (const ok of outcomes) {

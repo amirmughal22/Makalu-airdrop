@@ -66,6 +66,17 @@ CREATE INDEX IF NOT EXISTS idx_job_wallets_status ON job_wallets (status)`);
 CREATE INDEX IF NOT EXISTS idx_job_wallets_worker ON job_wallets (assigned_worker)`);
   await db.query(`
 CREATE INDEX IF NOT EXISTS idx_job_wallets_pending_claim ON job_wallets (status, next_attempt_at, id)`);
+  await db.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_job_wallets_one_processing_per_signer
+     ON job_wallets (lower(trim(signer_address)))
+     WHERE status = 'processing' AND signer_address IS NOT NULL AND length(trim(signer_address)) > 0`,
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_job_wallets_completed_recent ON job_wallets (updated_at DESC) WHERE status = 'completed'`,
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_job_wallets_failed_recent ON job_wallets (updated_at DESC) WHERE status = 'failed'`,
+  );
 
   await db.query(`
 CREATE TABLE IF NOT EXISTS queue_worker_heartbeats (

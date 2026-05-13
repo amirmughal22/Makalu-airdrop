@@ -330,6 +330,18 @@ export default function MakaluAirdropSuite({
     databaseConfigured: boolean;
     globalPausedEnv: boolean;
     canToggle: boolean;
+    throughput?: {
+      activeSigners: number;
+      txPerMinuteLast1: number;
+      txPerMinuteLast5Avg: number;
+      failedTxPerMinuteLast1: number;
+      signerTxsPerMinute: number;
+      globalTxsPerMinute: number;
+      targetTxPerMinute: number;
+      estimatedTxPerMin: number;
+      throughputWarning: string | null;
+      txRateLimitingEnabled: boolean;
+    } | null;
   } | null>(null);
   const [queueRuntimeLoading, setQueueRuntimeLoading] = useState(false);
   const [historyStatusFilter, setHistoryStatusFilter] = useState<"all" | "running" | "paused" | "stopped" | "completed">("all");
@@ -771,6 +783,23 @@ export default function MakaluAirdropSuite({
     return () => {
       cancelled = true;
     };
+  }, [dashboardMode, sessionVerified, dashSection, authHeaders]);
+
+  useEffect(() => {
+    if (!dashboardMode || !sessionVerified || dashSection !== "queue-worker") return;
+    const tick = () => {
+      void (async () => {
+        try {
+          const res = await fetch("/api/airdrop/queue-runtime", { headers: authHeaders() });
+          const data = (await res.json()) as NonNullable<typeof queueRuntimeInfo>;
+          if (res.ok) setQueueRuntimeInfo(data);
+        } catch {
+          /* ignore */
+        }
+      })();
+    };
+    const id = setInterval(tick, 12_000);
+    return () => clearInterval(id);
   }, [dashboardMode, sessionVerified, dashSection, authHeaders]);
 
   useEffect(() => {
@@ -2511,8 +2540,10 @@ export default function MakaluAirdropSuite({
                   ) : queueRuntimeInfo ? (
                     <>
                       <p className="text-xs text-slate-600 dark:text-slate-400">
-                        Runtime flags are stored in MySQL (<code className="rounded bg-slate-100 px-1 dark:bg-black">queue_runtime_settings</code>
-                        ). Env must still allow features (e.g. <code className="rounded bg-slate-100 px-1 dark:bg-black">AIRDROP_QUEUE_V2=true</code>
+                        Runtime flags are stored in PostgreSQL (
+                        <code className="rounded bg-slate-100 px-1 dark:bg-black">queue_runtime_settings</code>
+                        ). Env must still allow features (e.g.{" "}
+                        <code className="rounded bg-slate-100 px-1 dark:bg-black">AIRDROP_QUEUE_V2=true</code>
                         ).
                       </p>
                       <div className="grid gap-3">
@@ -2606,8 +2637,8 @@ export default function MakaluAirdropSuite({
                             }}
                           />
                           <p className="text-xs text-slate-500 dark:text-slate-500">
-                            Range 1–10. Each loop runs the normalized queue worker in this Node process with a distinct
-                            worker ID (MySQL <code className="rounded bg-slate-100 px-1 dark:bg-black">SKIP LOCKED</code>
+                            Range 1–10.                             Each loop runs the normalized queue worker in this Node process with a distinct
+                            worker ID (<code className="rounded bg-slate-100 px-1 dark:bg-black">SKIP LOCKED</code>
                             ). For separate machines or PM2 clusters, run{" "}
                             <code className="rounded bg-slate-100 px-1 dark:bg-black">npm run worker:queue</code> per
                             process instead or in addition.
@@ -2629,7 +2660,7 @@ export default function MakaluAirdropSuite({
                             key={`mp-${queueRuntimeInfo.maxParallelTxs}`}
                             type="range"
                             min={1}
-                            max={20}
+                            max={100}
                             step={1}
                             defaultValue={queueRuntimeInfo.maxParallelTxs}
                             disabled={queueRuntimeLoading || !queueRuntimeInfo.canToggle}
@@ -2643,9 +2674,10 @@ export default function MakaluAirdropSuite({
                             }}
                           />
                           <p className="text-xs text-slate-500 dark:text-slate-500">
-                            Range 1–20. Caps simultaneous sends per batch wave (also override via{" "}
+                            Range 1–100. Caps simultaneous sends per batch wave across distinct signers (also override via{" "}
                             <code className="rounded bg-slate-100 px-1 dark:bg-black">AIRDROP_MAX_PARALLEL_TXS</code> when
-                            DB unavailable).
+                            DB unavailable). Nonce safety: at most one in-flight send per signer; claims pick at most one
+                            pending row per signer while another row for that signer is processing.
                           </p>
                         </div>
                         <div className="space-y-2 border-t border-slate-200 pt-4 dark:border-[#333333]">
@@ -2678,6 +2710,55 @@ export default function MakaluAirdropSuite({
                           </p>
                         </div>
                       </div>
+                      <div className="space-y-3 rounded-xl border border-slate-200 bg-white/60 p-4 dark:border-[#333333] dark:bg-[#101010]">
+                        <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                          Throughput metrics
+                        </p>
+                        {queueRuntimeInfo.throughput ? (
+                          <>
+                            <dl className="grid gap-2 text-xs text-slate-800 dark:text-slate-200 sm:grid-cols-2">
+                              <div className="flex justify-between gap-2">
+                                <dt className="text-slate-500 dark:text-slate-400">Active signers</dt>
+                                <dd className="font-mono tabular-nums">{queueRuntimeInfo.throughput.activeSigners}</dd>
+                              </div>
+                              <div className="flex justify-between gap-2">
+                                <dt className="text-slate-500 dark:text-slate-400">Tx/min (last 1 min)</dt>
+                                <dd className="font-mono tabular-nums">{queueRuntimeInfo.throughput.txPerMinuteLast1}</dd>
+                              </div>
+                              <div className="flex justify-between gap-2">
+                                <dt className="text-slate-500 dark:text-slate-400">Tx/min avg (last 5 min)</dt>
+                                <dd className="font-mono tabular-nums">{queueRuntimeInfo.throughput.txPerMinuteLast5Avg}</dd>
+                              </div>
+                              <div className="flex justify-between gap-2">
+                                <dt className="text-slate-500 dark:text-slate-400">Failed tx/min (last 1 min)</dt>
+                                <dd className="font-mono tabular-nums">{queueRuntimeInfo.throughput.failedTxPerMinuteLast1}</dd>
+                              </div>
+                              <div className="flex justify-between gap-2">
+                                <dt className="text-slate-500 dark:text-slate-400">Signer cap / min (env)</dt>
+                                <dd className="font-mono tabular-nums">{queueRuntimeInfo.throughput.signerTxsPerMinute}</dd>
+                              </div>
+                              <div className="flex justify-between gap-2">
+                                <dt className="text-slate-500 dark:text-slate-400">Global cap / min (env)</dt>
+                                <dd className="font-mono tabular-nums">{queueRuntimeInfo.throughput.globalTxsPerMinute}</dd>
+                              </div>
+                            </dl>
+                            <p className="text-xs text-slate-600 dark:text-slate-400">
+                              Estimated ceiling ≈ active signers × signer cap ={" "}
+                              <span className="font-mono">{queueRuntimeInfo.throughput.estimatedTxPerMin}</span>/min
+                              (global cap {queueRuntimeInfo.throughput.globalTxsPerMinute}/min). Target throughput{" "}
+                              {queueRuntimeInfo.throughput.targetTxPerMinute}/min
+                              {queueRuntimeInfo.throughput.txRateLimitingEnabled ? "" : " — rate limiting off (`AIRDROP_TX_RATE_LIMITING=false`)"}.
+                            </p>
+                            {queueRuntimeInfo.throughput.throughputWarning ? (
+                              <p className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
+                                {queueRuntimeInfo.throughput.throughputWarning}
+                              </p>
+                            ) : null}
+                          </>
+                        ) : (
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Metrics unavailable.</p>
+                        )}
+                      </div>
                       {!queueRuntimeInfo.canToggle ? (
                         <p className="text-xs text-amber-700 dark:text-amber-400">
                           Your wallet is not in <code className="rounded bg-amber-100 px-1 dark:bg-amber-950">AIRDROP_QUEUE_CONTROL_ADDRESSES</code>{" "}
@@ -2687,7 +2768,7 @@ export default function MakaluAirdropSuite({
                       <ul className="space-y-1.5 rounded-xl border border-slate-200 p-3 text-xs text-slate-700 dark:border-[#333333] dark:text-slate-300">
                         <li>
                           <span className="font-medium">DATABASE_URL:</span>{" "}
-                          {queueRuntimeInfo.databaseConfigured ? "set" : "missing — configure MySQL"}
+                          {queueRuntimeInfo.databaseConfigured ? "set" : "missing — configure PostgreSQL"}
                         </li>
                         <li>
                           <span className="font-medium">AIRDROP_QUEUE_V2 (env):</span>{" "}

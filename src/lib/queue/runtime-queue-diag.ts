@@ -16,15 +16,27 @@ export function isSqlExplainEnabled(): boolean {
 
 /** PUBLIC_CLAIM_SQL matches {@link claimWalletBatch} SELECT shape for EXPLAIN (no FOR UPDATE). */
 export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
-       FROM job_wallets jw
-       INNER JOIN jobs j ON j.id = jw.job_id
-       WHERE jw.status = 'pending'
-         AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
-         AND jw.retry_count < ?
-         AND j.status IN ('queued', 'running')
-         AND NOT j.paused
-       ORDER BY jw.job_id, jw.id
-       LIMIT ?`;
+       FROM (
+         SELECT DISTINCT ON (lower(trim(jw2.signer_address)))
+           jw2.id
+         FROM job_wallets jw2
+         INNER JOIN jobs j2 ON j2.id = jw2.job_id
+         WHERE jw2.status = 'pending'
+           AND (jw2.next_attempt_at IS NULL OR jw2.next_attempt_at <= NOW())
+           AND jw2.retry_count < ?
+           AND j2.status IN ('queued', 'running')
+           AND NOT j2.paused
+           AND jw2.signer_address IS NOT NULL
+           AND length(trim(jw2.signer_address)) > 0
+           AND NOT EXISTS (
+             SELECT 1 FROM job_wallets px
+             WHERE px.status = 'processing'
+               AND lower(trim(px.signer_address)) = lower(trim(jw2.signer_address))
+           )
+         ORDER BY lower(trim(jw2.signer_address)), j2.queued_at ASC NULLS LAST, j2.id, jw2.id
+         LIMIT ?
+       ) picked
+       INNER JOIN job_wallets jw ON jw.id = picked.id`;
 
 export function maskDatabaseUrlHostDb(url: string): string {
   try {

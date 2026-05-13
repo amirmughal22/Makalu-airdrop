@@ -6,7 +6,7 @@ export type QueueRuntimeFlags = {
   processingEnabled: boolean;
   normalizedQueueV2: boolean;
   embeddedWorker: boolean;
-  /** Parallel transfers per wave (1–20). */
+  /** Parallel transfers per wave (1–100). */
   maxParallelTxs: number;
   /** Legacy embedded job runner: concurrent jobs in this process (1–32). */
   maxConcurrentJobs: number;
@@ -200,7 +200,7 @@ export async function refreshQueueRuntimeCache(): Promise<void> {
 
 function clampParallel(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_FLAGS.maxParallelTxs;
-  return Math.min(20, Math.max(1, Math.floor(n)));
+  return Math.min(100, Math.max(1, Math.floor(n)));
 }
 
 function clampConcurrentJobs(n: number): number {

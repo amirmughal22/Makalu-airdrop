@@ -28,11 +28,11 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Max simultaneous eth_send* per wave (limits RPC/nginx load). Dashboard 1–20; env fallback. */
+/** Max simultaneous eth_send* per wave (limits RPC/nginx load). Dashboard 1–100; env fallback. */
 export function maxParallelTxsPerWave(): number {
   const db = getQueueRuntimeFlagsSync().maxParallelTxs;
-  if (typeof db === "number" && db >= 1 && db <= 20) return db;
-  return envInt("AIRDROP_MAX_PARALLEL_TXS", 6, 1, 20);
+  if (typeof db === "number" && db >= 1 && db <= 100) return db;
+  return envInt("AIRDROP_MAX_PARALLEL_TXS", 6, 1, 100);
 }
 
 /** Max airdrop jobs running at once in this process. Dashboard 1–32; env fallback up to 64. */
