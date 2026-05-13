@@ -31,6 +31,7 @@
     "queue:diagnose": "node scripts/diagnose-stuck-queue.mjs",
     "queue:repair-stuck": "node scripts/queue-repair-stuck.mjs",
     "queue:worker-self-test": "node ./node_modules/tsx/dist/cli.mjs scripts/queue-worker-self-test.ts",
+    "queue:debug-one-job": "node scripts/debug-one-job-claim.mjs",
     "test-queue-claim-sql": "node scripts/test-queue-claim-sql.mjs",
     "bench:pending-count": "node --env-file=.env scripts/benchmark-pending-count.mjs",
     "bench:queue-claim": "node --env-file=.env scripts/bench-queue-claim.mjs"

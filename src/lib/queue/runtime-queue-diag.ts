@@ -2,8 +2,15 @@ import { existsSync, mkdirSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { userInfo } from "node:os";
 import type { Pool } from "pg";
-import { CLAIM_ES_JW2_J2, CLAIM_ES_PX_JP } from "./claim-select-sql";
+import {
+  CLAIM_ES_JW2_J2,
+  CLAIM_ES_PX_JP,
+  CLAIM_WALLET_ORDER_BY_JW2_J2,
+  claimJobEligibleWhere,
+} from "./claim-select-sql";
 import { isAirdropQueueV2EnvEnabled } from "./config";
+
+const CLAIM_J2_ELIGIBLE = claimJobEligibleWhere("j2");
 
 export function isRuntimeQueueDiagEnabled(): boolean {
   const v = process.env.AIRDROP_QUEUE_RUNTIME_DIAG?.trim().toLowerCase();
@@ -25,8 +32,7 @@ export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
          WHERE jw2.status = 'pending'
            AND (jw2.next_attempt_at IS NULL OR jw2.next_attempt_at <= NOW())
            AND jw2.retry_count < ?
-           AND j2.status IN ('queued', 'running')
-           AND NOT j2.paused
+           AND ${CLAIM_J2_ELIGIBLE}
            AND (${CLAIM_ES_JW2_J2}) IS NOT NULL
            AND NOT EXISTS (
              SELECT 1 FROM job_wallets px
@@ -34,7 +40,7 @@ export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
              WHERE px.status = 'processing'
                AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW2_J2}))
            )
-         ORDER BY lower(trim(${CLAIM_ES_JW2_J2})), j2.queued_at ASC NULLS LAST, j2.id, jw2.id
+         ORDER BY lower(trim(${CLAIM_ES_JW2_J2})), ${CLAIM_WALLET_ORDER_BY_JW2_J2}
          LIMIT ?
        ) picked
        INNER JOIN job_wallets jw ON jw.id = picked.id`;

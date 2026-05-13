@@ -1,6 +1,7 @@
 import { getPostgresPool, pgQuery } from "../postgres";
 import { getQueueClaimDiagnostics } from "./job-queue-repo";
 import { refreshQueueRuntimeCache, getQueueRuntimeCacheMeta } from "./queue-runtime-settings";
+import { CLAIM_JOB_ELIGIBLE_WHERE } from "./claim-select-sql";
 
 /** Jobs with pending/processing work whose row has not moved in this many seconds — stall heuristic. */
 const STALE_JOB_SEC = 600;
@@ -31,8 +32,7 @@ export async function getQueueOperationalSnapshot(): Promise<QueueOperationalSna
             EXTRACT(EPOCH FROM (NOW() - j.updated_at)) * 1000 AS age_ms,
             (SELECT COUNT(*) FROM job_wallets jw WHERE jw.job_id = j.id AND jw.status = 'pending') AS pend
      FROM jobs j
-     WHERE j.status IN ('queued','running')
-       AND NOT j.paused
+     WHERE (${CLAIM_JOB_ELIGIBLE_WHERE})
        AND EXISTS (SELECT 1 FROM job_wallets jw2 WHERE jw2.job_id = j.id AND jw2.status IN ('pending','processing'))
        AND j.updated_at < NOW() - (? * INTERVAL '1 second')
      ORDER BY j.updated_at ASC

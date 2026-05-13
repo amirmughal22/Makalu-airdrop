@@ -1,4 +1,5 @@
 import { getPostgresPool, pgQuery } from "../postgres";
+import { CLAIM_JOB_ELIGIBLE_WHERE } from "./claim-select-sql";
 
 export type QueueThroughputMetrics = {
   activeSigners: number;
@@ -25,8 +26,7 @@ export async function getQueueThroughputMetrics(): Promise<QueueThroughputMetric
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
        WHERE jw.status IN ('pending', 'processing')
-         AND j.status IN ('queued', 'running')
-         AND NOT j.paused
+         AND (${CLAIM_JOB_ELIGIBLE_WHERE})
          AND jw.signer_address IS NOT NULL
          AND length(trim(jw.signer_address)) > 0
      ),

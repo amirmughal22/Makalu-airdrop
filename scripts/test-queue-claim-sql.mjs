@@ -41,6 +41,9 @@ const batch = envInt("AIRDROP_QUEUE_BATCH_SIZE", 48, 1, 500);
 const maxRetries = envInt("AIRDROP_QUEUE_MAX_RETRIES", 5, 0, 100);
 const maxAttempts = maxRetries + 1;
 
+const CLAIM_JOB_ELIGIBLE_WHERE = `(j.paused IS NOT TRUE AND j.status IN ('queued', 'running', 'processing'))`;
+const CLAIM_WALLET_ORDER_BY_JW_J = `md5(jw.job_id::text || ':' || jw.id::text), j.queued_at ASC NULLS LAST, j.id, jw.id`;
+
 const CLAIM_SQL = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
    jw.id AS id, jw.job_id AS "jobId"
    FROM job_wallets jw
@@ -48,8 +51,7 @@ const CLAIM_SQL = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
    WHERE jw.status = 'pending'
      AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
      AND jw.retry_count < $1
-     AND j.status IN ('queued', 'running')
-     AND NOT j.paused
+     AND (${CLAIM_JOB_ELIGIBLE_WHERE})
      AND (${CLAIM_ES_JW_J}) IS NOT NULL
      AND NOT EXISTS (
        SELECT 1 FROM job_wallets px
@@ -57,7 +59,7 @@ const CLAIM_SQL = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
        WHERE px.status = 'processing'
          AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
      )
-   ORDER BY lower(trim(${CLAIM_ES_JW_J})), j.queued_at ASC NULLS LAST, j.id, jw.id
+   ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
    LIMIT $2
    FOR UPDATE OF jw SKIP LOCKED`;
 
@@ -70,8 +72,7 @@ async function main() {
        FROM jobs j
        INNER JOIN job_wallets jw ON jw.job_id = j.id
        WHERE jw.status = 'pending'
-         AND j.status IN ('queued','running')
-         AND NOT j.paused`,
+         AND (${CLAIM_JOB_ELIGIBLE_WHERE})`,
     );
     const simple = await c.query(
       `SELECT COUNT(*)::text AS c FROM job_wallets WHERE status = 'pending'

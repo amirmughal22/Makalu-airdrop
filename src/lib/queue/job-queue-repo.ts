@@ -31,6 +31,8 @@ import {
   CLAIM_BACKFILL_SIGNER_FROM_JOB,
   CLAIM_ES_JW_J,
   CLAIM_ES_PX_JP,
+  CLAIM_JOB_ELIGIBLE_WHERE,
+  CLAIM_WALLET_ORDER_BY_JW_J,
 } from "./claim-select-sql";
 
 /** Throttle structured logs when claim returns 0 while SQL still sees claimable pending rows. */
@@ -619,8 +621,7 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
        WHERE jw.status = 'pending'
          AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
          AND jw.retry_count < ?
-         AND j.status IN ('queued', 'running')
-         AND NOT j.paused
+         AND ${CLAIM_JOB_ELIGIBLE_WHERE}
          AND (${CLAIM_ES_JW_J}) IS NOT NULL
          AND NOT EXISTS (
            SELECT 1 FROM job_wallets px
@@ -628,7 +629,7 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
            WHERE px.status = 'processing'
              AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
-       ORDER BY lower(trim(${CLAIM_ES_JW_J})), j.queued_at ASC NULLS LAST, j.id, jw.id
+       ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
        LIMIT ?
        FOR UPDATE OF jw SKIP LOCKED`;
     if (diag) console.info("[claim-diag] claim_sql=", sql.replace(/\s+/g, " ").slice(0, 220) + "…");
@@ -812,8 +813,7 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
        WHERE jw.status = 'pending'
          AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
          AND jw.retry_count < ?
-         AND j.status IN ('queued', 'running')
-         AND NOT j.paused
+         AND ${CLAIM_JOB_ELIGIBLE_WHERE}
          AND (${CLAIM_ES_JW_J}) IS NOT NULL
          AND NOT EXISTS (
            SELECT 1 FROM job_wallets px
@@ -821,7 +821,7 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
            WHERE px.status = 'processing'
              AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
-       ORDER BY lower(trim(${CLAIM_ES_JW_J})), j.queued_at ASC NULLS LAST, j.id, jw.id
+       ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
        LIMIT ?
        FOR UPDATE OF jw SKIP LOCKED`;
     const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, batch]);
@@ -1174,8 +1174,7 @@ export async function getQueueClaimDiagnostics(): Promise<QueueClaimDiagnostics>
      WHERE jw.status = 'pending'
        AND (jw.next_attempt_at IS NULL OR jw.next_attempt_at <= NOW())
        AND jw.retry_count < ?
-       AND j.status IN ('queued', 'running')
-       AND NOT j.paused
+       AND (${CLAIM_JOB_ELIGIBLE_WHERE})
        AND (${CLAIM_ES_JW_J}) IS NOT NULL`,
     [maxAttempts],
   );
@@ -1203,10 +1202,7 @@ export async function getQueueClaimDiagnostics(): Promise<QueueClaimDiagnostics>
     `SELECT COUNT(*)::text AS c FROM job_wallets jw
      INNER JOIN jobs j ON j.id = jw.job_id
      WHERE jw.status = 'pending'
-       AND (
-         j.status NOT IN ('queued', 'running')
-         OR j.paused IS TRUE
-       )`,
+       AND NOT (${CLAIM_JOB_ELIGIBLE_WHERE})`,
   );
   const pendingBlockedByJobState = Number(blockedRows[0]?.c ?? 0);
 
