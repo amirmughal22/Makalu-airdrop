@@ -7,6 +7,7 @@ import {
   recordWalletFailure,
   recordWalletSuccess,
   reconcileAllJobStatusesFromWallets,
+  reconcileJobStatusesFromWallets,
   reconcileStaleProcessingRows,
 } from "./job-queue-repo";
 import {
@@ -19,6 +20,7 @@ import {
 import { acquireTxSendBudget } from "./tx-rate-limiter";
 import {
   queueAdaptiveParallelEnabled,
+  queueMaintenanceIntervalMs,
   queueWorkerId,
   queueWorkerInterBatchSleepMs,
   queueWorkerPollMs,
@@ -138,6 +140,8 @@ export async function runAirdropQueueWorker(
   const fileLog = options?.fileLogger;
   let iteration = 0;
   const interSleep = queueWorkerInterBatchSleepMs();
+  const maintenanceInterval = queueMaintenanceIntervalMs();
+  let lastMaintenanceMs = 0;
   let cumulativeOk = 0;
   let cumulativeFail = 0;
   let lastBatchFailRatio = 0;
@@ -194,25 +198,29 @@ export async function runAirdropQueueWorker(
     if (verboseLoop || iteration === 1 || iteration % 25 === 0) {
       console.info(JSON.stringify({ event: "queue_worker_loop_tick", iteration, workerId: workerId.slice(0, 64) }));
     }
-    try {
-      const n = await reconcileStaleProcessingRows();
-      if (n > 0) {
-        console.log(`[queue-worker] reconciled ${n} stale processing row(s)`);
-        try {
-          const jr = await reconcileAllJobStatusesFromWallets();
-          if (jr > 0) console.log(`[queue-worker] reconciled ${jr} job status row(s) after stale wallet reset`);
-        } catch (e) {
-          console.error("[queue-worker] job status reconcile after stale reset failed", e);
-        }
-      }
+    const nowForMaintenance = Date.now();
+    if (lastMaintenanceMs === 0 || nowForMaintenance - lastMaintenanceMs >= maintenanceInterval) {
+      lastMaintenanceMs = nowForMaintenance;
       try {
-        const nf = await reconcileStaleFundTransferProcessing();
-        if (nf > 0) console.log(`[queue-worker] reconciled ${nf} stale fund transfer row(s)`);
+        const n = await reconcileStaleProcessingRows();
+        if (n > 0) {
+          console.log(`[queue-worker] reconciled ${n} stale processing row(s)`);
+          try {
+            const jr = await reconcileAllJobStatusesFromWallets();
+            if (jr > 0) console.log(`[queue-worker] reconciled ${jr} job status row(s) after stale wallet reset`);
+          } catch (e) {
+            console.error("[queue-worker] job status reconcile after stale reset failed", e);
+          }
+        }
+        try {
+          const nf = await reconcileStaleFundTransferProcessing();
+          if (nf > 0) console.log(`[queue-worker] reconciled ${nf} stale fund transfer row(s)`);
+        } catch (e) {
+          console.error("[queue-worker] fund transfer stale reconciliation failed", e);
+        }
       } catch (e) {
-        console.error("[queue-worker] fund transfer stale reconciliation failed", e);
+        console.error("[queue-worker] stale reconciliation failed", e);
       }
-    } catch (e) {
-      console.error("[queue-worker] stale reconciliation failed", e);
     }
 
     let batch: ClaimedWalletRow[] = [];
@@ -315,12 +323,12 @@ export async function runAirdropQueueWorker(
       console.error("[queue-worker] heartbeat upsert failed after batch", e instanceof Error ? e.stack ?? e.message : e);
     }
     try {
-      const jr = await reconcileAllJobStatusesFromWallets();
+      const jr = await reconcileJobStatusesFromWallets(jobIds);
       if (jr > 0) {
-        console.log(`[queue-worker] reconciled ${jr} parent job status row(s) after batch`);
+        console.log(`[queue-worker] reconciled ${jr} touched job status row(s) after batch`);
       }
     } catch (e) {
-      console.error("[queue-worker] reconcileAllJobStatusesFromWallets failed", e);
+      console.error("[queue-worker] reconcileJobStatusesFromWallets failed", e);
     }
     }
 

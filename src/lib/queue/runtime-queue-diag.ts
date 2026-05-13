@@ -8,6 +8,7 @@ import {
   CLAIM_WALLET_ORDER_BY_JW2_J2,
   claimJobEligibleWhere,
   claimNotBlockedByProcessingFundTransfers,
+  claimSignerAdvisoryLockSql,
 } from "./claim-select-sql";
 import { isAirdropQueueV2EnvEnabled } from "./config";
 
@@ -24,10 +25,13 @@ export function isSqlExplainEnabled(): boolean {
 }
 
 /** PUBLIC_CLAIM_SQL matches {@link claimWalletBatch} SELECT shape for EXPLAIN (no FOR UPDATE). */
-export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
-       FROM (
-         SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW2_J2})))
-           jw2.id
+export const CLAIM_SELECT_DIAG_SQL = `WITH pre_candidates AS MATERIALIZED (
+         SELECT jw2.id AS id,
+                jw2.job_id AS "jobId",
+                lower(trim(${CLAIM_ES_JW2_J2})) AS signer_key,
+                md5(jw2.job_id::text || ':' || jw2.id::text) AS claim_hash,
+                j2.queued_at AS queued_at,
+                j2.id AS job_sort_id
          FROM job_wallets jw2
          INNER JOIN jobs j2 ON j2.id = jw2.job_id
          WHERE jw2.status = 'pending'
@@ -42,9 +46,22 @@ export const CLAIM_SELECT_DIAG_SQL = `SELECT jw.id AS id, jw.job_id AS "jobId"
                AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW2_J2}))
            )
            AND ${claimNotBlockedByProcessingFundTransfers(`lower(trim(${CLAIM_ES_JW2_J2}))`)}
-         ORDER BY lower(trim(${CLAIM_ES_JW2_J2})), ${CLAIM_WALLET_ORDER_BY_JW2_J2}
+         ORDER BY ${CLAIM_WALLET_ORDER_BY_JW2_J2}
          LIMIT ?
-       ) picked
+       ),
+       signer_locked AS MATERIALIZED (
+         SELECT *
+         FROM pre_candidates
+         WHERE ${claimSignerAdvisoryLockSql("signer_key")}
+       ),
+       picked AS (
+         SELECT DISTINCT ON (signer_key) id, "jobId", signer_key, claim_hash, queued_at, job_sort_id
+         FROM signer_locked
+         ORDER BY signer_key, claim_hash, queued_at ASC NULLS LAST, job_sort_id, id
+         LIMIT ?
+       )
+       SELECT jw.id AS id, jw.job_id AS "jobId"
+       FROM picked
        INNER JOIN job_wallets jw ON jw.id = picked.id`;
 
 export function maskDatabaseUrlHostDb(url: string): string {

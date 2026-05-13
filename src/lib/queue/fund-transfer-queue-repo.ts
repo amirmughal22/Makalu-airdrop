@@ -5,10 +5,12 @@ import { getBatchForOwner } from "../generated-wallet-repo";
 import {
   claimNotBlockedByProcessingFundTransfers,
   claimNotBlockedByProcessingJobWallets,
+  claimSignerAdvisoryLockSql,
 } from "./claim-select-sql";
 import {
   isAirdropQueueV2Enabled,
-  queueClaimBatchSize,
+  queueClaimCandidateLimit,
+  queueEffectiveClaimBatchSize,
   queueGlobalPaused,
   queueMaxAttempts,
   queueRetryBackoffMsForRetryCount,
@@ -306,14 +308,16 @@ export async function claimFundTransferBatch(workerId: string): Promise<ClaimedF
     return [];
   }
   const pool = await getPostgresPool();
-  const batch = queueClaimBatchSize();
+  const batch = queueEffectiveClaimBatchSize();
+  const candidateLimit = queueClaimCandidateLimit(batch);
   const maxAttempts = queueMaxAttempts();
 
-  const ftPickSub = `SELECT DISTINCT ON (lower(trim(ft.signer_address)))
-       ft.id AS id, ft.fund_transfer_job_id AS "fundTransferJobId", ft.owner AS owner,
-              ft.signer_address AS "signerAddress", ft.target_wallet_address AS "targetWalletAddress",
-              ft.amount AS amount, ft.mode AS mode, ft.token_address AS "tokenAddress", ft.chain_id AS "chainId",
-              ft.retry_count AS "retryCount"
+  const sql = `WITH pre_candidates AS MATERIALIZED (
+       SELECT ft.id AS id, ft.fund_transfer_job_id AS "fundTransferJobId", ft.owner AS owner,
+              ft.signer_address AS "signerAddress", lower(trim(ft.signer_address)) AS signer_key,
+              md5(ft.fund_transfer_job_id || ':' || ft.id::text) AS claim_hash,
+              ft.target_wallet_address AS "targetWalletAddress", ft.amount AS amount, ft.mode AS mode,
+              ft.token_address AS "tokenAddress", ft.chain_id AS "chainId", ft.retry_count AS "retryCount"
        FROM fund_transfer_queue ft
        WHERE ft.status = 'pending'
          AND ft.transfer_type = 'airdrop_fund_transfer'
@@ -326,23 +330,33 @@ export async function claimFundTransferBatch(workerId: string): Promise<ClaimedF
            WHERE fty.status = 'processing'
              AND lower(trim(fty.signer_address)) = lower(trim(ft.signer_address))
          )
-       ORDER BY lower(trim(ft.signer_address)),
-                md5(ft.fund_transfer_job_id || ':' || ft.id::text),
+       ORDER BY md5(ft.fund_transfer_job_id || ':' || ft.id::text),
                 ft.fund_transfer_job_id,
                 ft.id
-       LIMIT ?`;
-  const sql = `SELECT picked.id AS id, picked."fundTransferJobId" AS "fundTransferJobId", picked.owner AS owner,
-       picked."signerAddress" AS "signerAddress", picked."targetWalletAddress" AS "targetWalletAddress",
-       picked.amount AS amount, picked.mode AS mode, picked."tokenAddress" AS "tokenAddress",
-       picked."chainId" AS "chainId", picked."retryCount" AS "retryCount"
-       FROM (${ftPickSub}) picked
-       INNER JOIN fund_transfer_queue ft ON ft.id = picked.id
-       FOR UPDATE OF ft SKIP LOCKED`;
+       LIMIT ?
+       FOR UPDATE OF ft SKIP LOCKED
+     ),
+     signer_locked AS MATERIALIZED (
+       SELECT *
+       FROM pre_candidates
+       WHERE ${claimSignerAdvisoryLockSql("signer_key")}
+     ),
+     picked AS (
+       SELECT DISTINCT ON (signer_key)
+              id, "fundTransferJobId", owner, "signerAddress", "targetWalletAddress",
+              amount, mode, "tokenAddress", "chainId", "retryCount", signer_key, claim_hash
+       FROM signer_locked
+       ORDER BY signer_key, claim_hash, "fundTransferJobId", id
+       LIMIT ?
+     )
+     SELECT id, "fundTransferJobId", owner, "signerAddress", "targetWalletAddress",
+            amount, mode, "tokenAddress", "chainId", "retryCount"
+     FROM picked`;
 
   const conn = await pool.connect();
   try {
     await conn.query("BEGIN");
-    const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, batch]);
+    const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, candidateLimit, batch]);
     if (!rows.length) {
       await conn.query("COMMIT");
       return [];

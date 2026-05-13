@@ -87,6 +87,7 @@ void (async () => {
     collectQueueClaimBlockers,
     embeddedNormalizedQueueWorkerEnabled,
     queueClaimBatchSize,
+    queueEffectiveClaimBatchSize,
     queueWorkerPollMs,
     queueWorkerId,
   } = await import("../src/lib/queue/config");
@@ -137,6 +138,7 @@ void (async () => {
     workerId,
     pollMs: queueWorkerPollMs(),
     claimBatchSize: queueClaimBatchSize(),
+    effectiveClaimBatchSize: queueEffectiveClaimBatchSize(),
     strictStartup: strict,
     projectRoot: PROJECT_ROOT,
     argv0: process.argv[0],
@@ -150,7 +152,7 @@ void (async () => {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   console.log(
-    `[airdrop-queue-worker] started workerId=${workerId} NODE_APP_INSTANCE=${process.env.NODE_APP_INSTANCE ?? "(unset)"} poll ~${queueWorkerPollMs()}ms batch ≤${queueClaimBatchSize()} · set AIRDROP_QUEUE_RUNTIME_DIAG=1 for per-claim SQL logs`,
+    `[airdrop-queue-worker] started workerId=${workerId} NODE_APP_INSTANCE=${process.env.NODE_APP_INSTANCE ?? "(unset)"} poll ~${queueWorkerPollMs()}ms batch ${queueEffectiveClaimBatchSize()}/${queueClaimBatchSize()} · set AIRDROP_QUEUE_RUNTIME_DIAG=1 for per-claim SQL logs`,
   );
 
   await runAirdropQueueWorker(abort.signal, {

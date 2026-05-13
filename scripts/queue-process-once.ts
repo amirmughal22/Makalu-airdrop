@@ -11,7 +11,7 @@ const ROOT = path.resolve(__dirname, "..");
 import { assertDatabaseConfigured, bootstrapProductionEnv } from "../src/lib/queue/production-env";
 import { refreshQueueRuntimeCache } from "../src/lib/queue/queue-runtime-settings";
 import { collectQueueClaimBlockers } from "../src/lib/queue/config";
-import { claimWalletBatch } from "../src/lib/queue/job-queue-repo";
+import { claimWalletBatch, reconcileJobStatusesFromWallets } from "../src/lib/queue/job-queue-repo";
 import { processClaimedWalletRow } from "../src/lib/queue/queue-worker";
 import { queueWorkerId } from "../src/lib/queue/config";
 
@@ -35,6 +35,7 @@ void (async () => {
   for (const row of batch) {
     await processClaimedWalletRow(row);
   }
+  await reconcileJobStatusesFromWallets([...new Set(batch.map((row) => row.jobId))]);
   console.info("[queue:process-once] done");
   process.exit(0);
 })().catch((e) => {

@@ -15,6 +15,18 @@ export const CLAIM_ES_JW_J = claimEffectiveSignerExpr("jw", "j");
 export const CLAIM_ES_JW2_J2 = claimEffectiveSignerExpr("jw2", "j2");
 export const CLAIM_ES_PX_JP = claimEffectiveSignerExpr("px", "jp");
 
+/** Shared advisory-lock namespace for all EVM transaction queues (job_wallets + fund transfers). */
+export const CLAIM_SIGNER_ADVISORY_LOCK_CLASS = 8420004;
+
+/**
+ * Transaction-scoped signer lock used during claim.
+ * This closes the race where two workers claim different pending rows for the same signer before
+ * either row becomes visible as `processing`.
+ */
+export function claimSignerAdvisoryLockSql(signerLowerTrimExpr: string): string {
+  return `pg_try_advisory_xact_lock(${CLAIM_SIGNER_ADVISORY_LOCK_CLASS}, hashtext(${signerLowerTrimExpr}))`;
+}
+
 /** UPDATE … FROM jobs j — same coalesce as claim SELECT (backfill column for partial unique index). */
 export const CLAIM_BACKFILL_SIGNER_FROM_JOB = `COALESCE(
   NULLIF(TRIM(jw.signer_address), ''),

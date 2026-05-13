@@ -12,8 +12,28 @@ const LUA_RETRY_MS = 40;
 const PG_RETRY_MS = 80;
 const PG_MAX_WAIT_MS = 90_000;
 
+type PgBudgetSnapshot = {
+  bucket: string;
+  completed: number;
+  reserved: number;
+  refreshedAt: number;
+};
+
+let globalPgBudget: PgBudgetSnapshot | null = null;
+const signerPgBudgets = new Map<string, PgBudgetSnapshot>();
+
 function minuteBucket(): string {
   return String(Math.floor(Date.now() / 60_000));
+}
+
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const n = parseInt(process.env[name]?.trim() ?? "", 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function pgSnapshotCacheMs(): number {
+  return envInt("AIRDROP_TX_RATE_LIMIT_PG_CACHE_MS", 2000, 100, 30_000);
 }
 
 function redisSignerKey(signerLower: string): string {
@@ -49,6 +69,34 @@ async function pgCountCompletedSince(
   return Math.max(0, Math.floor(Number(rows[0]?.c ?? 0) || 0));
 }
 
+async function pgBudgetSnapshot(signerLower: string | null): Promise<PgBudgetSnapshot> {
+  const bucket = minuteBucket();
+  const now = Date.now();
+  const cacheMs = pgSnapshotCacheMs();
+  const existing = signerLower ? signerPgBudgets.get(signerLower) ?? null : globalPgBudget;
+  if (existing && existing.bucket === bucket && now - existing.refreshedAt < cacheMs) return existing;
+
+  const completed = await pgCountCompletedSince(signerLower, 60_000);
+  const next: PgBudgetSnapshot = {
+    bucket,
+    completed,
+    reserved: existing?.bucket === bucket ? existing.reserved : 0,
+    refreshedAt: now,
+  };
+  if (signerLower) {
+    signerPgBudgets.set(signerLower, next);
+    if (signerPgBudgets.size > 5000) {
+      for (const [key, snap] of signerPgBudgets) {
+        if (snap.bucket !== bucket || now - snap.refreshedAt > 5 * 60_000) signerPgBudgets.delete(key);
+        if (signerPgBudgets.size <= 4000) break;
+      }
+    }
+  } else {
+    globalPgBudget = next;
+  }
+  return next;
+}
+
 /**
  * Blocks until a send slot is allowed under per-signer and global minute caps.
  * Uses Redis when available (accurate across processes); otherwise PostgreSQL completed counts (soft).
@@ -78,16 +126,18 @@ export async function acquireTxSendBudget(signerAddressLower: string): Promise<v
       continue;
     }
 
-    const gc = await pgCountCompletedSince(null, 60_000);
-    if (gc >= gLim) {
+    const gc = await pgBudgetSnapshot(null);
+    if (gc.completed + gc.reserved >= gLim) {
       await sleep(PG_RETRY_MS);
       continue;
     }
-    const sc = await pgCountCompletedSince(signer, 60_000);
-    if (sc >= sLim) {
+    const sc = await pgBudgetSnapshot(signer);
+    if (sc.completed + sc.reserved >= sLim) {
       await sleep(PG_RETRY_MS);
       continue;
     }
+    gc.reserved++;
+    sc.reserved++;
     return;
   }
 

@@ -52,6 +52,26 @@ export function queueClaimBatchSize(): number {
   return envInt("AIRDROP_QUEUE_BATCH_SIZE", 48, 1, 500);
 }
 
+/**
+ * Rows a worker should durably move to `processing` in one claim.
+ *
+ * Keep this at or below the per-worker send wave so one process does not hoard dozens of signer
+ * slots while it can only broadcast a smaller number at once. Operators can still raise
+ * `max_parallel_txs` from the dashboard when a single worker should take larger batches.
+ */
+export function queueEffectiveClaimBatchSize(): number {
+  const configured = queueClaimBatchSize();
+  const parallel = getQueueRuntimeFlagsSync().maxParallelTxs;
+  const activeSendSlots = Number.isFinite(parallel) ? Math.max(1, Math.floor(parallel)) : configured;
+  return Math.min(configured, activeSendSlots);
+}
+
+/** Candidate rows briefly locked while finding distinct signers for a claim. */
+export function queueClaimCandidateLimit(claimLimit = queueEffectiveClaimBatchSize()): number {
+  const multiplier = envInt("AIRDROP_QUEUE_CLAIM_CANDIDATE_MULTIPLIER", 8, 1, 100);
+  return Math.min(5000, Math.max(claimLimit, claimLimit * multiplier));
+}
+
 /** Rows per INSERT when creating a job (default 1000). */
 export function queueBulkInsertChunk(): number {
   return envInt("AIRDROP_QUEUE_BULK_CHUNK", 1000, 50, 10_000);
@@ -87,6 +107,11 @@ export function queueWorkerPollMs(): number {
 /** Extra sleep after each claimed batch (reduces RPC/DB pressure under load). Default 0. */
 export function queueWorkerInterBatchSleepMs(): number {
   return envInt("AIRDROP_QUEUE_WORKER_INTER_BATCH_SLEEP_MS", 0, 0, 300_000);
+}
+
+/** How often each worker runs stale-row maintenance. Default 30s; first loop still runs it. */
+export function queueMaintenanceIntervalMs(): number {
+  return envInt("AIRDROP_QUEUE_MAINTENANCE_INTERVAL_MS", 30_000, 1000, 3_600_000);
 }
 
 /** When true, workers claim nothing (global drain-stop). Checked each poll. */

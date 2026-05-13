@@ -1,4 +1,3 @@
-import type { PoolClient } from "pg";
 import { assertSignerCountWithinJobLimit } from "../airdrop-signer-limits";
 import { safeRollbackPgClient } from "../postgres-rollback";
 import { getPostgresPool, pgExecute, pgQuery } from "../postgres";
@@ -8,7 +7,8 @@ import {
   collectQueueClaimBlockers,
   isAirdropQueueV2Enabled,
   queueBulkInsertChunk,
-  queueClaimBatchSize,
+  queueClaimCandidateLimit,
+  queueEffectiveClaimBatchSize,
   queueGlobalPaused,
   queueMaxAttempts,
   queueRetryBackoffMsForRetryCount,
@@ -34,31 +34,12 @@ import {
   CLAIM_JOB_ELIGIBLE_WHERE,
   CLAIM_WALLET_ORDER_BY_JW_J,
   claimNotBlockedByProcessingFundTransfers,
+  claimSignerAdvisoryLockSql,
 } from "./claim-select-sql";
 
 /** Throttle structured logs when claim returns 0 while SQL still sees claimable pending rows. */
 let lastClaimStarvationLogMs = 0;
 const CLAIM_STARVATION_LOG_COOLDOWN_MS = 60_000;
-
-/** Drive job.status from wallet states — no COUNT(*) on job_wallets (hot path). */
-const REFRESH_JOB_STATUS_SQL = `UPDATE jobs j
-     SET
-       status = CASE
-         WHEN j.paused IS TRUE THEN j.status
-         WHEN j.status IN ('draft', 'cancelled') THEN j.status
-         WHEN EXISTS (
-           SELECT 1 FROM job_wallets jw
-           WHERE jw.job_id = j.id AND jw.status IN ('pending', 'processing')
-         ) THEN CASE WHEN j.status = 'draft' THEN j.status ELSE 'running' END
-         WHEN EXISTS (SELECT 1 FROM job_wallets jw WHERE jw.job_id = j.id AND jw.status = 'failed') THEN 'failed'
-         ELSE 'completed'
-       END,
-       updated_at = NOW()
-     WHERE j.id = ?`;
-
-async function refreshJobStatusOnlyConn(conn: PoolClient, jobId: string): Promise<void> {
-  await pgExecute(conn, REFRESH_JOB_STATUS_SQL, [jobId]);
-}
 
 function isPostgresDeadlock(e: unknown): boolean {
   const x = e as { code?: string };
@@ -557,7 +538,8 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
     return [];
   }
   const pool = await getPostgresPool();
-  const batch = queueClaimBatchSize();
+  const batch = queueEffectiveClaimBatchSize();
+  const candidateLimit = queueClaimCandidateLimit(batch);
   const maxAttempts = queueMaxAttempts();
 
   let pendingApprox = 0;
@@ -589,6 +571,7 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
         try {
           const expl = await pgQuery<Record<string, unknown>>(pool, `EXPLAIN (FORMAT JSON) ${CLAIM_SELECT_DIAG_SQL}`, [
             maxAttempts,
+            candidateLimit,
             batch,
           ]);
           console.info("[claim-diag] EXPLAIN", JSON.stringify(expl));
@@ -610,13 +593,17 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
       console.info(`[claim-diag] tx_begin_ms=${Math.round(performance.now() - txT0)} isolation=${iso ?? "?"}`);
     }
     /**
-     * Two-stage claim: PostgreSQL forbids `SELECT DISTINCT … FOR UPDATE` on the same SELECT.
-     * Stage A — candidates inside a subquery (DISTINCT ON signer, no lock).
-     * Stage B — lock real `job_wallets` rows with `FOR UPDATE OF jw SKIP LOCKED`.
+     * Lock a small candidate pool first, then take a transaction-scoped signer advisory lock.
+     * This keeps parallel worker processes from piling onto the same signer while preserving
+     * one in-flight nonce per signer.
      */
-    const claimPickSub = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
-       jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
+    const sql = `WITH pre_candidates AS MATERIALIZED (
+       SELECT jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
               jw.retry_count AS "retryCount", (${CLAIM_ES_JW_J}) AS "signerAddress",
+              lower(trim(${CLAIM_ES_JW_J})) AS signer_key,
+              md5(jw.job_id::text || ':' || jw.id::text) AS claim_hash,
+              j.queued_at AS queued_at,
+              j.id AS job_sort_id,
               j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
@@ -632,19 +619,30 @@ export async function claimWalletBatch(workerId: string): Promise<ClaimedWalletR
              AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
          AND ${claimNotBlockedByProcessingFundTransfers(`lower(trim(${CLAIM_ES_JW_J}))`)}
-       ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
-       LIMIT ?`;
-    const sql = `SELECT picked.id AS id, picked."jobId" AS "jobId", picked."walletAddress" AS "walletAddress",
-       picked.amount AS amount, picked."retryCount" AS "retryCount", picked."signerAddress" AS "signerAddress",
-       picked.owner AS owner, picked.mode AS mode, picked."tokenAddress" AS "tokenAddress", picked."chainId" AS "chainId"
-       FROM (${claimPickSub}) picked
-       INNER JOIN job_wallets jw ON jw.id = picked.id
-       INNER JOIN jobs j ON j.id = jw.job_id
-       FOR UPDATE OF jw SKIP LOCKED`;
+       ORDER BY ${CLAIM_WALLET_ORDER_BY_JW_J}
+       LIMIT ?
+       FOR UPDATE OF jw SKIP LOCKED
+     ),
+     signer_locked AS MATERIALIZED (
+       SELECT *
+       FROM pre_candidates
+       WHERE ${claimSignerAdvisoryLockSql("signer_key")}
+     ),
+     picked AS (
+       SELECT DISTINCT ON (signer_key)
+              id, "jobId", "walletAddress", amount, "retryCount", "signerAddress",
+              owner, mode, "tokenAddress", "chainId", signer_key, claim_hash, queued_at, job_sort_id
+       FROM signer_locked
+       ORDER BY signer_key, claim_hash, queued_at ASC NULLS LAST, job_sort_id, id
+       LIMIT ?
+     )
+     SELECT id, "jobId", "walletAddress", amount, "retryCount", "signerAddress",
+            owner, mode, "tokenAddress", "chainId"
+     FROM picked`;
     if (diag) console.info("[claim-diag] claim_sql=", sql.replace(/\s+/g, " ").slice(0, 220) + "…");
 
     const selT0 = performance.now();
-    const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, batch]);
+    const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, candidateLimit, batch]);
     const selMs = Math.round(performance.now() - selT0);
 
     if (!rows.length) {
@@ -808,14 +806,19 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
     return [];
   }
   const pool = await getPostgresPool();
-  const batch = queueClaimBatchSize();
+  const batch = queueEffectiveClaimBatchSize();
+  const candidateLimit = queueClaimCandidateLimit(batch);
   const maxAttempts = queueMaxAttempts();
   const conn = await pool.connect();
   try {
     await conn.query("BEGIN");
-    const claimPickSub = `SELECT DISTINCT ON (lower(trim(${CLAIM_ES_JW_J})))
-       jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
+    const sql = `WITH pre_candidates AS MATERIALIZED (
+       SELECT jw.id AS id, jw.job_id AS "jobId", jw.wallet_address AS "walletAddress", jw.amount AS amount,
               jw.retry_count AS "retryCount", (${CLAIM_ES_JW_J}) AS "signerAddress",
+              lower(trim(${CLAIM_ES_JW_J})) AS signer_key,
+              md5(jw.job_id::text || ':' || jw.id::text) AS claim_hash,
+              j.queued_at AS queued_at,
+              j.id AS job_sort_id,
               j.owner AS owner, j.mode AS mode, j.token_address AS "tokenAddress", j.chain_id AS "chainId"
        FROM job_wallets jw
        INNER JOIN jobs j ON j.id = jw.job_id
@@ -831,16 +834,27 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
              AND lower(trim(${CLAIM_ES_PX_JP})) = lower(trim(${CLAIM_ES_JW_J}))
          )
          AND ${claimNotBlockedByProcessingFundTransfers(`lower(trim(${CLAIM_ES_JW_J}))`)}
-       ORDER BY lower(trim(${CLAIM_ES_JW_J})), ${CLAIM_WALLET_ORDER_BY_JW_J}
-       LIMIT ?`;
-    const sql = `SELECT picked.id AS id, picked."jobId" AS "jobId", picked."walletAddress" AS "walletAddress",
-       picked.amount AS amount, picked."retryCount" AS "retryCount", picked."signerAddress" AS "signerAddress",
-       picked.owner AS owner, picked.mode AS mode, picked."tokenAddress" AS "tokenAddress", picked."chainId" AS "chainId"
-       FROM (${claimPickSub}) picked
-       INNER JOIN job_wallets jw ON jw.id = picked.id
-       INNER JOIN jobs j ON j.id = jw.job_id
-       FOR UPDATE OF jw SKIP LOCKED`;
-    const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, batch]);
+       ORDER BY ${CLAIM_WALLET_ORDER_BY_JW_J}
+       LIMIT ?
+       FOR UPDATE OF jw SKIP LOCKED
+     ),
+     signer_locked AS MATERIALIZED (
+       SELECT *
+       FROM pre_candidates
+       WHERE ${claimSignerAdvisoryLockSql("signer_key")}
+     ),
+     picked AS (
+       SELECT DISTINCT ON (signer_key)
+              id, "jobId", "walletAddress", amount, "retryCount", "signerAddress",
+              owner, mode, "tokenAddress", "chainId", signer_key, claim_hash, queued_at, job_sort_id
+       FROM signer_locked
+       ORDER BY signer_key, claim_hash, queued_at ASC NULLS LAST, job_sort_id, id
+       LIMIT ?
+     )
+     SELECT id, "jobId", "walletAddress", amount, "retryCount", "signerAddress",
+            owner, mode, "tokenAddress", "chainId"
+     FROM picked`;
+    const rows = await pgQuery<Record<string, unknown>>(conn, sql, [maxAttempts, candidateLimit, batch]);
     if (!rows.length) {
       await conn.query("COMMIT");
       return [];
@@ -878,7 +892,7 @@ export async function claimWalletBatchDryRun(workerId: string): Promise<number[]
 
 /**
  * Full recount from `job_wallets` — O(n) per job. Use after bulk edits, migration, or admin repair.
- * Hot path (`recordWallet*`) uses incremental counters + {@link refreshJobStatusOnlyConn} only.
+ * Hot path (`recordWallet*`) uses incremental counters; workers reconcile touched jobs once per batch.
  */
 export async function refreshJobAggregates(jobId: string): Promise<void> {
   const pool = await getPostgresPool();
@@ -907,6 +921,50 @@ export async function refreshJobAggregates(jobId: string): Promise<void> {
   await maybeAutoRerunLoopJob(jobId);
 }
 
+/**
+ * Targeted status reconciliation for jobs touched by one worker batch.
+ * This replaces doing the expensive pending/failed EXISTS checks after every single wallet tx.
+ */
+export async function reconcileJobStatusesFromWallets(jobIds: string[]): Promise<number> {
+  const ids = [...new Set(jobIds.map((id) => id.trim()).filter(Boolean))];
+  if (ids.length === 0) return 0;
+  const pool = await getPostgresPool();
+  const ph = ids.map(() => "?").join(", ");
+  const result = await pgExecute(
+    pool,
+    `WITH computed AS (
+       SELECT j.id,
+         CASE
+           WHEN j.paused IS TRUE THEN j.status
+           WHEN j.status IN ('draft', 'cancelled') THEN j.status
+           WHEN EXISTS (
+             SELECT 1 FROM job_wallets jw
+             WHERE jw.job_id = j.id AND jw.status IN ('pending', 'processing')
+           ) THEN CASE WHEN j.status = 'draft' THEN j.status ELSE 'running' END
+           WHEN EXISTS (
+             SELECT 1 FROM job_wallets jw
+             WHERE jw.job_id = j.id AND jw.status = 'failed'
+           ) THEN 'failed'
+           ELSE 'completed'
+         END AS new_status
+       FROM jobs j
+       WHERE j.id IN (${ph})
+     )
+     UPDATE jobs j
+     SET status = c.new_status,
+         updated_at = NOW()
+     FROM computed c
+     WHERE j.id = c.id AND j.status IS DISTINCT FROM c.new_status`,
+    ids,
+  );
+
+  const { maybeAutoRerunLoopJob } = await import("../normalized-job-db");
+  for (const id of ids) {
+    await maybeAutoRerunLoopJob(id);
+  }
+  return result.rowCount ?? 0;
+}
+
 export async function recordWalletSuccess(
   walletRowId: number,
   jobId: string,
@@ -932,7 +990,6 @@ export async function recordWalletSuccess(
         `UPDATE jobs SET processed_wallets = processed_wallets + 1, updated_at = NOW() WHERE id = ?`,
         [jobId],
       );
-      await refreshJobStatusOnlyConn(conn, jobId);
       await conn.query("COMMIT");
       break;
     } catch (e) {
@@ -946,9 +1003,6 @@ export async function recordWalletSuccess(
       conn.release();
     }
   }
-
-  const { maybeAutoRerunLoopJob } = await import("../normalized-job-db");
-  await maybeAutoRerunLoopJob(jobId);
 
   markWalletCompleted();
 }
@@ -1002,7 +1056,6 @@ export async function recordWalletFailure(
           [nextRetry, errMsg.slice(0, 8000), nextAt, walletRowId],
         );
       }
-      await refreshJobStatusOnlyConn(conn, jobId);
       await conn.query("COMMIT");
       break;
     } catch (e) {
@@ -1016,9 +1069,6 @@ export async function recordWalletFailure(
       conn.release();
     }
   }
-
-  const { maybeAutoRerunLoopJob } = await import("../normalized-job-db");
-  await maybeAutoRerunLoopJob(jobId);
 }
 
 /** Recover rows stuck in processing (worker crash). Preserves `retry_count`; appends audit text to `error_message`. */

@@ -13,6 +13,7 @@ import {
   collectQueueClaimBlockers,
   isAirdropQueueV2EnvEnabled,
   queueClaimBatchSize,
+  queueEffectiveClaimBatchSize,
   queueWorkerId,
   queueWorkerPollMs,
 } from "../src/lib/queue/config";
@@ -35,6 +36,7 @@ void (async () => {
         AIRDROP_WORKER_ID: process.env.AIRDROP_WORKER_ID ?? "(unset)",
         pollMs: queueWorkerPollMs(),
         claimBatchSize: queueClaimBatchSize(),
+        effectiveClaimBatchSize: queueEffectiveClaimBatchSize(),
         queueClaimBlockers: collectQueueClaimBlockers(),
       },
       null,

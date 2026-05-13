@@ -336,6 +336,9 @@ export default function MakaluAirdropSuite({
     maxParallelTxs: number;
     maxConcurrentJobs: number;
     embeddedWorkerCount: number;
+    configuredClaimBatchSize?: number;
+    effectiveClaimBatchSize?: number;
+    claimCandidateLimit?: number;
     embeddedWorkerActiveLoops: number;
     queueV2Effective: boolean;
     queueV2Env: boolean;
@@ -2891,6 +2894,17 @@ export default function MakaluAirdropSuite({
                             <code className="rounded bg-slate-100 px-1 dark:bg-black">AIRDROP_MAX_PARALLEL_TXS</code> when
                             DB unavailable). Nonce safety: at most one in-flight send per signer; claims pick at most one
                             pending row per signer while another row for that signer is processing.
+                          </p>
+                          <p className="text-xs text-slate-500 dark:text-slate-500">
+                            Effective claim size:{" "}
+                            <span className="font-mono">
+                              {queueRuntimeInfo.effectiveClaimBatchSize ?? queueRuntimeInfo.maxParallelTxs}
+                            </span>
+                            /{queueRuntimeInfo.configuredClaimBatchSize ?? "env"} rows; candidate pool{" "}
+                            <span className="font-mono">
+                              {queueRuntimeInfo.claimCandidateLimit ?? "auto"}
+                            </span>
+                            .
                           </p>
                         </div>
                         <div className="space-y-2 border-t border-slate-200 pt-4 dark:border-[#333333]">
