@@ -66,6 +66,25 @@ CREATE INDEX IF NOT EXISTS idx_job_wallets_status ON job_wallets (status)`);
 CREATE INDEX IF NOT EXISTS idx_job_wallets_worker ON job_wallets (assigned_worker)`);
   await db.query(`
 CREATE INDEX IF NOT EXISTS idx_job_wallets_pending_claim ON job_wallets (status, next_attempt_at, id)`);
+  /** Before partial unique index: historical data may have several `processing` rows per signer (pre-fix workers). */
+  await db.query(`
+WITH ranked AS (
+  SELECT id,
+         ROW_NUMBER() OVER (
+           PARTITION BY lower(trim(signer_address))
+           ORDER BY id ASC
+         ) AS rn
+  FROM job_wallets
+  WHERE status = 'processing'
+    AND signer_address IS NOT NULL
+    AND length(trim(signer_address)) > 0
+)
+UPDATE job_wallets jw
+SET status = 'pending',
+    assigned_worker = NULL,
+    updated_at = NOW()
+FROM ranked r
+WHERE jw.id = r.id AND r.rn > 1`);
   await db.query(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_job_wallets_one_processing_per_signer
      ON job_wallets (lower(trim(signer_address)))
