@@ -85,6 +85,36 @@ function shortAddr(address?: string) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
+/** English ordinal for run count (1 → "1st", 5 → "5th", 21 → "21st"). */
+function englishOrdinal(n: number): string {
+  const x = Math.max(0, Math.floor(Number(n)));
+  if (!Number.isFinite(x) || x < 1) return "1st";
+  const v = x % 100;
+  if (v >= 11 && v <= 13) return `${x}th`;
+  switch (x % 10) {
+    case 1:
+      return `${x}st`;
+    case 2:
+      return `${x}nd`;
+    case 3:
+      return `${x}rd`;
+    default:
+      return `${x}th`;
+  }
+}
+
+function roundSummaryLine(job: BatchJob): string {
+  const cr = Math.max(1, Math.floor(Number(job.currentRun ?? 1)));
+  const tr = Math.max(1, Math.floor(Number(job.targetRunCount ?? 1)));
+  if (job.loopForever) {
+    return `${englishOrdinal(cr)} round · continuous loop`;
+  }
+  if (tr <= 1) {
+    return `${englishOrdinal(cr)} round`;
+  }
+  return `${englishOrdinal(cr)} round of ${tr}`;
+}
+
 async function parseApiJson<T>(res: Response, fallback: string): Promise<T> {
   const raw = await res.text();
   let parsed: unknown;
@@ -407,16 +437,24 @@ export default function DashboardJobDetail() {
             <CardHeader>
               <CardTitle className="flex flex-wrap items-start justify-between gap-3 text-xl">
                 <span className="break-all font-mono text-base font-semibold">{job.jobId}</span>
-                <span className="shrink-0 rounded-lg bg-slate-100 px-3 py-1 text-sm font-semibold uppercase dark:bg-[#222222]">
-                  {job.status}
-                </span>
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <span className="rounded-lg bg-slate-100 px-3 py-1 text-sm font-semibold uppercase dark:bg-[#222222]">
+                    {job.status}
+                  </span>
+                  <span
+                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 dark:border-[#333333] dark:bg-[#1a1a1a] dark:text-slate-200"
+                    title="How many full passes this job has reached (from server current_run)"
+                  >
+                    {roundSummaryLine(job)}
+                  </span>
+                </div>
               </CardTitle>
               <p className="text-sm text-slate-600 dark:text-slate-400">
                 {new Date(job.createdAt).toLocaleString()} · {chainDisplayLabel(job.chainId)} ·{" "}
                 <span className="uppercase">{job.mode}</span>
                 {jobSt === "queued" && typeof job.queuePosition === "number" ? ` · queue #${job.queuePosition}` : ""}
                 {" · "}
-                {job.loopForever ? "continuous loop" : `pass ${job.currentRun ?? 1}/${job.targetRunCount ?? 1}`}
+                Pass {job.currentRun ?? 1}/{job.loopForever ? "∞" : job.targetRunCount ?? 1}
               </p>
             </CardHeader>
             <CardContent className="space-y-4">
