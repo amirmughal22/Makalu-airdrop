@@ -45,6 +45,9 @@ Also set `AIRDROP_QUEUE_V2=true`, `DATABASE_URL`, and a **unique** `AIRDROP_WORK
 | `AIRDROP_EMBEDDED_QUEUE_WORKER` | `false` | Set on the **web** app when dedicated `worker:queue` replicas handle claims (recommended). |
 | `AIRDROP_QUEUE_MAINTENANCE_INTERVAL_MS` | `30000` | Each worker runs stale-row cleanup on this interval instead of every poll. |
 | `AIRDROP_TX_RATE_LIMIT_PG_CACHE_MS` | `2000` | PostgreSQL fallback cache when Redis is unset/down; use Redis for strict multi-process caps. |
+| `AIRDROP_RPC_HTTP_TIMEOUT_MS` | `30000` | Per-RPC request timeout so a worker cannot hang forever on an HTTP call. |
+| `AIRDROP_TX_RECEIPT_TIMEOUT_MS` | `180000` | Receipt wait guard. Lower it if workers stay alive but rows sit in `processing`. |
+| `AIRDROP_TX_WAIT_FOR_RECEIPT` | `true` | Set `false` only if you prefer recording submitted tx hashes immediately over waiting for mined receipts. |
 
 ## Align DB parallel cap with env
 
@@ -59,6 +62,18 @@ The Dashboard “Queue worker” UI can set the same field (1–100); env `AIRDR
 ## Dashboard throughput
 
 Queue worker → **Throughput metrics** shows active signers (pending/processing), completed tx/min (1- and 5-minute windows), failed tx/min, env caps, and **estimated_tx_per_min = active_signers × AIRDROP_SIGNER_TXS_PER_MINUTE**. A warning appears when that estimate is below `AIRDROP_TARGET_TX_PER_MINUTE` (defaults to `AIRDROP_GLOBAL_TXS_PER_MINUTE`) and at least one signer is active.
+
+## When workers are running but transactions stop
+
+Check whether rows are stuck in `processing` while worker heartbeats still move. The usual cause is not RPC reachability itself, but a send or receipt wait that never finishes. These guards now bound that path:
+
+| Variable | Default | Use |
+|----------|---------|-----|
+| `AIRDROP_RPC_HTTP_TIMEOUT_MS` | `30000` | Fails a hung RPC HTTP request. |
+| `AIRDROP_TX_RECEIPT_TIMEOUT_MS` | `180000` | Fails a tx receipt wait and lets the queue retry/back off instead of blocking that worker forever. |
+| `AIRDROP_TX_WAIT_FOR_RECEIPT` | `true` | Set to `false` to mark a tx complete once the hash is submitted. This avoids receipt stalls, but it will not detect later reverts. |
+
+For an already-stuck queue, run `npm run queue:diagnose` first, then `npm run queue:repair-stuck` if it reports stale `processing` rows.
 
 ## Warnings (read before scaling)
 
